@@ -1,0 +1,61 @@
+<launch>
+    <!-- ****************** MULTIBEAM PROCESSOR ****************** -->
+    
+    <arg name="mb_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/14_44_35/sparus2_multibeam_2025-10-28-14-44-35_0.bag"/>
+    <arg name="sss_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/10_56_48/sparus2_sidescan_2025-10-28-10-56-48_0.bag"/>
+    <arg name="output_dir" default="/home/uib/derelictes_ws/src/acoustic_postprocessing/results/"/>
+    
+    <arg name="offset_x" default="0.0"/>
+    <arg name="offset_y" default="0.0"/>
+    <arg name="offset_z" default="0.0"/>
+    <arg name="yaw_deg"  default="90.0"/>
+
+    <arg name="sor_k" default="50"/>
+    <arg name="sor_std" default="1.0"/>
+    <arg name="voxel_size" default="0.1"/>
+
+    <arg name="enable_slam" default="false"/>
+    <arg name="slam_map_voxel" default="0.5"/>
+    <arg name="slam_gicp_dist" default="2.0"/>
+
+    <!-- <param name="use_sim_time" value="true"/> -->
+    
+    <node pkg="acoustic_postprocessing" type="multibeam_processor.py" name="mb_multi_proc" output="screen" >
+        <param name="bag_file"      value="$(arg mb_bagfile)" />
+        <param name="scan_topic"    value="/sparus2/norbit_wbms_multibeam/multibeam_scan" />
+        <param name="nav_topic"     value="/sparus2/navigator/navigation" />
+        <param name="output_dir"    value="$(arg output_dir)" />
+        
+        <param name="offset_x" value="$(arg offset_x)" />
+        <param name="offset_y" value="$(arg offset_y)" />
+        <param name="offset_z" value="$(arg offset_z)" />
+        <param name="sensor_yaw" value="$(eval arg('yaw_deg') * 3.14159265 / 180.0)" />
+        
+        <param name="sor_k" value="$(arg sor_k)"/>
+        <param name="sor_std" value="$(arg sor_std)"/>
+        <param name="voxel_size" value="$(arg voxel_size)"/>
+        
+        <param name="enable_slam" value="$(arg enable_slam)"/>
+        <param name="slam_map_voxel" value="$(arg slam_map_voxel)"/>
+        <param name="slam_gicp_dist" value="$(arg slam_gicp_dist)"/>
+    </node>
+
+     <!-- ****************** SIDESCAN SONAR PROCESSOR ****************** -->
+
+    <node pkg="acoustic_postprocessing" type="sss2mosaic.py" name="sss_mosaic_gen" output="screen" >
+        <param name="bag_file" value="$(arg sss_bagfile)" />
+        <param name="output_dir" value="$(arg output_dir)" />
+    </node>
+
+    <node pkg="acoustic_postprocessing" type="sss_waterfall.py" name="sss_waterfall_gen" output="screen">
+        <param name="bag_file" value="$(arg sss_bagfile)" />
+        <param name="output_dir" value="$(arg output_dir)" />
+    </node>
+
+    <node pkg="acoustic_postprocessing" type="sss_mb_fusion.py" name="fusion_node" output="screen">
+        <param name="mesh_file" value="$(arg output_dir)/mb_mesh.ply" />
+        <param name="sss_tif"   value="$(arg output_dir)/sss_mosaic.tif" />
+        <param name="output_dir" value="$(arg output_dir)" />
+    </node>
+
+</launch>
