@@ -17,10 +17,11 @@ import rasterio
 from rasterio.transform import from_origin
 from pyproj import Transformer
 import tf.transformations as tr   
+from std_msgs.msg import Bool
+import time
 
 # ================= CONFIGURATION =================
 # Static paths have been removed. Now read via ROS parameters.
-
 BASE_FRAME = 'sparus2/base_link'
 SSS_FRAME  = 'sparus2/sidescan'
 
@@ -259,6 +260,11 @@ def main():
 
     bag.close()
     rospy.loginfo(f"✔ GeoTIFF successfully generated at: {output_tiff}")
+
+    pub_sss_done = rospy.Publisher('/pipeline/sss_done', Bool, queue_size=1, latch=True)
+    time.sleep(0.5)
+    pub_sss_done.publish(True)
+    rospy.loginfo("Sidescan completion signal sent.")
 
 if __name__ == "__main__":
     main()

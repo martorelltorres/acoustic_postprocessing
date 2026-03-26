@@ -5,6 +5,7 @@ import rosbag
 import numpy as np
 import cv2
 import os
+from std_msgs.msg import Bool
 
 # ================= CONFIGURATION =================
 NAV_TOPIC = '/sparus2/navigator/navigation'

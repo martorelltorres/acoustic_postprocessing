@@ -19,7 +19,10 @@ import tf.transformations as tr
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
-from pyproj import Transformer   ### CAMBIO
+from pyproj import Transformer   
+from std_msgs.msg import Bool
+import time
+
 
 
 # =========================================================
@@ -224,30 +227,38 @@ def main():
     # Orientar normales hacia arriba (importante para BPA en fondos marinos)
     pcd.orient_normals_to_align_with_direction([0.0, 0.0, 1.0])
 
-    rospy.loginfo("Ball Pivoting surface reconstruction...")
-    radii = o3d.utility.DoubleVector([0.1, 0.2, 0.4])
+    rospy.loginfo(f"Total de puntos en la nube: {len(pcd.points)}")
     
-    # CORRECCIÓN AQUÍ: create_from_point_cloud_ball_pivoting no devuelve densidades directamente.
-    # Si deseas filtrar por densidad, se suele usar Poisson. Para BPA, simplemente generamos la malla:
-    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-        pcd,
-        radii
-    )
+    # 1. Filtro extra para aligerar la nube antes de Poisson (opcional pero recomendado)
+    rospy.loginfo("Limpiando puntos atípicos (Outliers)...")
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    rospy.loginfo(f"Puntos tras limpieza: {len(pcd.points)}")
 
-    # Nota: He eliminado el bloque de 'density' y 'mask' porque BPA no los genera por defecto.
-    # Si la malla tiene huecos, el recorte por Bounding Box es suficiente:
+    # 2. Reconstrucción de Poisson con depth seguro
+    poisson_depth = rospy.get_param('~poisson_depth', 8) # Bajamos el depth por defecto a 8
+    rospy.loginfo(f"Iniciando Poisson con depth={poisson_depth}...")
+    
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=poisson_depth)
+    rospy.loginfo("✔ Poisson terminado. Recortando bordes...")
+
+    # 3. Recortar malla
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
-    
-    # Devolver a coordenadas originales
-    vertices = np.asarray(mesh.vertices)
-    vertices += centroid
+        
+    rospy.loginfo("Restaurando coordenadas originales...")
+    # CORRECCIÓN: Hacemos la suma normal (no +=) para evitar el error de solo-lectura
+    vertices = np.asarray(mesh.vertices) + centroid
     mesh.vertices = o3d.utility.Vector3dVector(vertices)
     mesh.compute_vertex_normals()
 
+    rospy.loginfo("Guardando malla...")
     mesh_file = os.path.join(output_dir, "mb_mesh.ply")
     o3d.io.write_triangle_mesh(mesh_file, mesh)
 
+    pub_mb_done = rospy.Publisher('/pipeline/mb_done', Bool, queue_size=1, latch=True)
+    time.sleep(0.5)
+    pub_mb_done.publish(True)
+    rospy.loginfo("Multibeam completion signal sent.")
 
 
 if __name__ == '__main__':

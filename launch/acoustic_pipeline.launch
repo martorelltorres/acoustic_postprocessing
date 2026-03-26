@@ -12,13 +12,13 @@
 
     <arg name="sor_k" default="50"/>
     <arg name="sor_std" default="1.0"/>
-    <arg name="voxel_size" default="0.1"/>
+    <arg name="voxel_size" default="0.05"/>
 
     <arg name="enable_slam" default="false"/>
     <arg name="slam_map_voxel" default="0.5"/>
     <arg name="slam_gicp_dist" default="2.0"/>
 
-    <!-- <param name="use_sim_time" value="true"/> -->
+    <param name="use_sim_time" value="true"/>
     
     <node pkg="acoustic_postprocessing" type="multibeam_processor.py" name="mb_multi_proc" output="screen" >
         <param name="bag_file"      value="$(arg mb_bagfile)" />
