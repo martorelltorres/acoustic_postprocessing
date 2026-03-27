@@ -26,7 +26,7 @@ import time
 
 
 # =========================================================
-# CRS CONFIG (MISMO QUE sss2mosaic)
+# CRS CONFIG (SAME AS sss2mosaic)
 # =========================================================
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM   = "EPSG:32631"
@@ -64,7 +64,7 @@ def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
 
 
 def get_nav_origin(bag, nav_topic):
-    """MISMA lógica que sss2mosaic.py"""
+    """SAME logic as sss2mosaic.py"""
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
         if hasattr(msg, 'origin'):
             lat0 = msg.origin.latitude
@@ -95,10 +95,13 @@ def main():
     base_frame   = rospy.get_param('~base_frame_id', 'sparus2/base_link')
     sensor_frame = rospy.get_param('~sensor_frame_id', 'sparus2/multibeam')
 
-    voxel_size = rospy.get_param('~voxel_size', 0.05)
+    # Adjusted voxel for better initial resolution
+    voxel_size = rospy.get_param('~voxel_size', 0.05) 
     sor_k      = rospy.get_param('~sor_k', 50)
     sor_std    = rospy.get_param('~sor_std', 1.0)
-    poisson_depth = rospy.get_param('~poisson_depth', 10)
+    
+    # Parameter to filter extreme beams (prevents raised edges pre-mesh)
+    angle_cutoff_deg = rospy.get_param('~angle_cutoff', 60.0)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -108,7 +111,7 @@ def main():
     bag = rosbag.Bag(bag_file)
 
     # -----------------------------------------------------
-    # NAV ORIGIN → UTM (CLAVE)
+    # NAV ORIGIN → UTM 
     # -----------------------------------------------------
     lat0, lon0 = get_nav_origin(bag, nav_topic)
     X0_UTM, Y0_UTM = ll_to_utm.transform(lon0, lat0)
@@ -150,9 +153,19 @@ def main():
     # -----------------------------------------------------
     # MULTIBEAM PROCESSING
     # -----------------------------------------------------
+    rospy.loginfo("Processing Multibeam pings...")
+    
+    # Diagnostic counters
+    total_pings = 0
+    out_of_time_pings = 0
+    angle_filtered_pings = 0
+
     for _, scan, t in bag.read_messages(topics=[scan_topic]):
+        total_pings += 1
         ts = t.to_sec()
+        
         if ts < nav_t[0] or ts > nav_t[-1]:
+            out_of_time_pings += 1
             continue
 
         pc = ros_numpy.point_cloud2.pointcloud2_to_array(scan)
@@ -162,18 +175,30 @@ def main():
             continue
 
         xyz = np.column_stack((pc['x'], pc['y'], pc['z']))
+        
+        # --- IMPROVEMENT 1: ANGULAR FILTER ---
+        depth_s = np.abs(xyz[:, 2])
+        across_s = np.abs(xyz[:, 1])
+        angles = np.degrees(np.arctan2(across_s, depth_s))
+        
+        points_before = len(xyz)
+        xyz = xyz[angles < angle_cutoff_deg]
+        
+        if len(xyz) < 10:
+            angle_filtered_pings += 1
+            continue
+        # ------------------------------------------
+
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(xyz)
 
         # SENSOR → VEHICLE
         pcd.transform(T_S2V)
 
-        # VEHICLE → WORLD (UTM ABSOLUTO)
+        # VEHICLE → WORLD (UTM ABSOLUTE)
         pos_local = interp_pos(ts)         # [north, east, depth]
-        # rot = slerp_rot(ts).as_matrix()
         rot_nav = slerp_rot(ts).as_matrix()
 
-        # Rotación correctora: 180 grados alrededor de Z
         R_fix = R.from_euler('z', np.pi).as_matrix()
 
         rot = R_fix @ rot_nav
@@ -189,6 +214,17 @@ def main():
         buffer_points.append(np.asarray(pcd.points))
 
     bag.close()
+
+    # --- DIAGNOSTIC REPORT ---
+    rospy.loginfo(f"Read summary: {total_pings} pings processed.")
+    if out_of_time_pings > 0:
+        rospy.logwarn(f"-> {out_of_time_pings} pings discarded due to lack of synchronized navigation.")
+    if angle_filtered_pings > 0:
+        rospy.logwarn(f"-> {angle_filtered_pings} pings removed by the extreme angular filter.")
+
+    if not buffer_points:
+        rospy.logerr("FATAL ERROR: The point list is empty. Aborting to prevent system crash.")
+        return
 
     # -----------------------------------------------------
     # FINAL POINT CLOUD
@@ -206,7 +242,7 @@ def main():
     save_pcd(pcd, xyz_file, "Multibeam XYZ (UTM)")
 
     # -----------------------------------------------------
-    # SURFACE RECONSTRUCTION
+    # SURFACE RECONSTRUCTION 
     # -----------------------------------------------------
     pts = np.asarray(pcd.points)
     centroid = pts.mean(axis=0)
@@ -224,34 +260,47 @@ def main():
         )
     )
 
-    # Orientar normales hacia arriba (importante para BPA en fondos marinos)
+    # Orient normals upwards 
     pcd.orient_normals_to_align_with_direction([0.0, 0.0, 1.0])
 
-    rospy.loginfo(f"Total de puntos en la nube: {len(pcd.points)}")
+    rospy.loginfo(f"Total points in the cloud: {len(pcd.points)}")
     
-    # 1. Filtro extra para aligerar la nube antes de Poisson (opcional pero recomendado)
-    rospy.loginfo("Limpiando puntos atípicos (Outliers)...")
+    rospy.loginfo("Cleaning outlier points...")
     pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-    rospy.loginfo(f"Puntos tras limpieza: {len(pcd.points)}")
+    rospy.loginfo(f"Points after cleaning: {len(pcd.points)}")
 
-    # 2. Reconstrucción de Poisson con depth seguro
-    poisson_depth = rospy.get_param('~poisson_depth', 8) # Bajamos el depth por defecto a 8
-    rospy.loginfo(f"Iniciando Poisson con depth={poisson_depth}...")
+    # --- INCREASE RESOLUTION  ---
+    poisson_depth = rospy.get_param('~poisson_depth', 11) 
+    rospy.loginfo(f"Starting Poisson with depth={poisson_depth}...")
     
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=poisson_depth)
-    rospy.loginfo("✔ Poisson terminado. Recortando bordes...")
+    rospy.loginfo("✔ Poisson finished.")
 
-    # 3. Recortar malla
+    # --- DENSITY FILTERING  ---
+    rospy.loginfo("Cropping edges extrapolated by Poisson...")
+    densities = np.asarray(densities)
+    
+    density_threshold = np.percentile(densities, 2) 
+    
+    vertices_to_remove = densities < density_threshold
+    mesh.remove_vertices_by_mask(vertices_to_remove)
+    
+    # Clean residual artifacts
+    mesh.remove_degenerate_triangles()
+    mesh.remove_duplicated_triangles()
+    mesh.remove_duplicated_vertices()
+    mesh.remove_non_manifold_edges()
+
+    # 4. Crop mesh by the original Bounding Box 
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
         
-    rospy.loginfo("Restaurando coordenadas originales...")
-    # CORRECCIÓN: Hacemos la suma normal (no +=) para evitar el error de solo-lectura
+    rospy.loginfo("Restoring original coordinates...")
     vertices = np.asarray(mesh.vertices) + centroid
     mesh.vertices = o3d.utility.Vector3dVector(vertices)
     mesh.compute_vertex_normals()
 
-    rospy.loginfo("Guardando malla...")
+    rospy.loginfo("Saving mesh...")
     mesh_file = os.path.join(output_dir, "mb_mesh.ply")
     o3d.io.write_triangle_mesh(mesh_file, mesh)
 

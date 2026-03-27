@@ -12,7 +12,7 @@
 
     <arg name="sor_k" default="50"/>
     <arg name="sor_std" default="1.0"/>
-    <arg name="voxel_size" default="0.05"/>
+    <arg name="voxel_size" default="0.01"/>
 
     <arg name="enable_slam" default="false"/>
     <arg name="slam_map_voxel" default="0.5"/>
@@ -42,7 +42,7 @@
 
      <!-- ****************** SIDESCAN SONAR PROCESSOR ****************** -->
 
-    <node pkg="acoustic_postprocessing" type="sss2mosaic.py" name="sss_mosaic_gen" output="screen" >
+    <!-- <node pkg="acoustic_postprocessing" type="sss2mosaic.py" name="sss_mosaic_gen" output="screen" >
         <param name="bag_file" value="$(arg sss_bagfile)" />
         <param name="output_dir" value="$(arg output_dir)" />
     </node>
@@ -56,6 +56,6 @@
         <param name="mesh_file" value="$(arg output_dir)/mb_mesh.ply" />
         <param name="sss_tif"   value="$(arg output_dir)/sss_mosaic.tif" />
         <param name="output_dir" value="$(arg output_dir)" />
-    </node>
+    </node> -->
 
 </launch>
