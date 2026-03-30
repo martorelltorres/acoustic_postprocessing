@@ -1,8 +1,10 @@
 <launch>
     <!-- ****************** MULTIBEAM PROCESSOR ****************** -->
     
-    <arg name="mb_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/14_44_35/sparus2_multibeam_2025-10-28-14-44-35_0.bag"/>
-    <arg name="sss_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/10_56_48/sparus2_sidescan_2025-10-28-10-56-48_0.bag"/>
+    <!-- <arg name="mb_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/14_44_35/sparus2_multibeam_2025-10-28-14-44-35_0.bag"/>
+    <arg name="sss_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/10_56_48/sparus2_sidescan_2025-10-28-10-56-48_0.bag"/> -->
+    <arg name="mb_bagfile" default="/home/uib/bagfiles/minex/12_39_13/sparus2_multibeam_2025-05-13-12-42-09_0.bag"/>
+    <arg name="sss_bagfile" default="/home/uib/bagfiles/minex/13_09_35/sparus2_sidescan_2025-05-13-13-14-54_0.bag"/>
     <arg name="output_dir" default="/home/uib/derelictes_ws/src/acoustic_postprocessing/results/"/>
     
     <arg name="offset_x" default="0.0"/>
@@ -42,7 +44,7 @@
 
      <!-- ****************** SIDESCAN SONAR PROCESSOR ****************** -->
 
-    <!-- <node pkg="acoustic_postprocessing" type="sss2mosaic.py" name="sss_mosaic_gen" output="screen" >
+     <node pkg="acoustic_postprocessing" type="sss2mosaic.py" name="sss_mosaic_gen" output="screen" >
         <param name="bag_file" value="$(arg sss_bagfile)" />
         <param name="output_dir" value="$(arg output_dir)" />
     </node>
@@ -50,12 +52,12 @@
     <node pkg="acoustic_postprocessing" type="sss_waterfall.py" name="sss_waterfall_gen" output="screen">
         <param name="bag_file" value="$(arg sss_bagfile)" />
         <param name="output_dir" value="$(arg output_dir)" />
-    </node>
+    </node> 
 
-    <node pkg="acoustic_postprocessing" type="sss_mb_fusion.py" name="fusion_node" output="screen">
+    <!-- <node pkg="acoustic_postprocessing" type="sss_mb_fusion.py" name="fusion_node" output="screen">
         <param name="mesh_file" value="$(arg output_dir)/mb_mesh.ply" />
         <param name="sss_tif"   value="$(arg output_dir)/sss_mosaic.tif" />
         <param name="output_dir" value="$(arg output_dir)" />
-    </node> -->
+    </node>  -->
 
 </launch>

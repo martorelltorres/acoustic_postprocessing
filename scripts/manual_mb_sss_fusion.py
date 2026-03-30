@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+Author: Antoni Martorell
+Affiliation: Systems, Robotics and Vision Group (SRV),
+             University of the Balearic Islands (UIB)
+Contact: antoni.martorell@uib.es
+License: This code is provided for research and academic purposes.
+"""
 
 import open3d as o3d
 import rasterio
@@ -13,7 +20,7 @@ MESH_FILE = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/mb_mesh
 SSS_TIF   = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/sss_mosaic.tif"
 OUTPUT_MESH = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/fused_data.ply"
 
-COLORMAP = cm.gray      # gray, viridis, inferno, etc.
+COLORMAP = cm.viridis     # gray, viridis, inferno, etc.
 NODATA_VALUE = 0
 
 # -----------------------------º

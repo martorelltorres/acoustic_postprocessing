@@ -23,10 +23,13 @@ from pyproj import Transformer
 from std_msgs.msg import Bool
 import time
 
+# --- IMPORTS FOR COLORING ---
+import matplotlib as mpl
+import matplotlib.colors as colors
 
 
 # =========================================================
-# CRS CONFIG (SAME AS sss2mosaic)
+# CRS CONFIG 
 # =========================================================
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM   = "EPSG:32631"
@@ -64,7 +67,6 @@ def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
 
 
 def get_nav_origin(bag, nav_topic):
-    """SAME logic as sss2mosaic.py"""
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
         if hasattr(msg, 'origin'):
             lat0 = msg.origin.latitude
@@ -95,57 +97,39 @@ def main():
     base_frame   = rospy.get_param('~base_frame_id', 'sparus2/base_link')
     sensor_frame = rospy.get_param('~sensor_frame_id', 'sparus2/multibeam')
 
-    # Adjusted voxel for better initial resolution
     voxel_size = rospy.get_param('~voxel_size', 0.05) 
     sor_k      = rospy.get_param('~sor_k', 50)
     sor_std    = rospy.get_param('~sor_std', 1.0)
     
-    # Parameter to filter extreme beams (prevents raised edges pre-mesh)
     angle_cutoff_deg = rospy.get_param('~angle_cutoff', 60.0)
+    density_percentile = rospy.get_param('~density_percentile', 8.0)
+    cmap_name = rospy.get_param('~colormap', 'viridis')
+    
+    # NUEVO PARÁMETRO: Invierte el eje Y para corregir el efecto espejo del driver
+    invert_mb_y = rospy.get_param('~invert_multibeam_y', True)
 
     os.makedirs(output_dir, exist_ok=True)
 
     # -----------------------------------------------------
-    # OPEN BAG
+    # OPEN BAG & TF
     # -----------------------------------------------------
     bag = rosbag.Bag(bag_file)
-
-    # -----------------------------------------------------
-    # NAV ORIGIN → UTM 
-    # -----------------------------------------------------
     lat0, lon0 = get_nav_origin(bag, nav_topic)
     X0_UTM, Y0_UTM = ll_to_utm.transform(lon0, lat0)
-    rospy.loginfo(f"✔ UTM origin: X0={X0_UTM:.2f}, Y0={Y0_UTM:.2f}")
-
-    # -----------------------------------------------------
-    # SENSOR → VEHICLE TF
-    # -----------------------------------------------------
     T_S2V = get_static_transform_from_tf(bag_file, base_frame, sensor_frame)
 
     # -----------------------------------------------------
-    # LOAD NAVIGATION DATA (LOCAL NED)
+    # LOAD NAVIGATION DATA
     # -----------------------------------------------------
     nav_t, nav_pos, nav_quat = [], [], []
-
     for _, msg, t in bag.read_messages(topics=[nav_topic]):
         nav_t.append(t.to_sec())
-        nav_pos.append([
-            msg.position.north,
-            msg.position.east,
-            msg.position.depth
-        ])
-
-        r = R.from_euler(
-            'xyz',
-            [msg.orientation.roll,
-             msg.orientation.pitch,
-             msg.orientation.yaw]
-        )
+        nav_pos.append([msg.position.north, msg.position.east, msg.position.depth])
+        r = R.from_euler('xyz', [msg.orientation.roll, msg.orientation.pitch, msg.orientation.yaw])
         nav_quat.append(r.as_quat())
 
     nav_t = np.array(nav_t)
-    interp_pos = interp1d(nav_t, np.array(nav_pos),
-                          axis=0, fill_value="extrapolate")
+    interp_pos = interp1d(nav_t, np.array(nav_pos), axis=0, fill_value="extrapolate")
     slerp_rot = Slerp(nav_t, R.from_quat(nav_quat))
 
     buffer_points = []
@@ -155,17 +139,10 @@ def main():
     # -----------------------------------------------------
     rospy.loginfo("Processing Multibeam pings...")
     
-    # Diagnostic counters
-    total_pings = 0
-    out_of_time_pings = 0
-    angle_filtered_pings = 0
-
     for _, scan, t in bag.read_messages(topics=[scan_topic]):
-        total_pings += 1
         ts = t.to_sec()
         
         if ts < nav_t[0] or ts > nav_t[-1]:
-            out_of_time_pings += 1
             continue
 
         pc = ros_numpy.point_cloud2.pointcloud2_to_array(scan)
@@ -174,40 +151,45 @@ def main():
         if len(pc) < 10:
             continue
 
-        xyz = np.column_stack((pc['x'], pc['y'], pc['z']))
+        # ========================================================
+        # CORRECCIÓN DE EFECTO ESPEJO: Invertimos la coordenada Y
+        # ========================================================
+        y_data = -pc['y'] if invert_mb_y else pc['y']
+        xyz = np.column_stack((pc['x'], y_data, pc['z']))
         
-        # --- IMPROVEMENT 1: ANGULAR FILTER ---
+        # --- ANGULAR FILTER ---
         depth_s = np.abs(xyz[:, 2])
         across_s = np.abs(xyz[:, 1])
         angles = np.degrees(np.arctan2(across_s, depth_s))
-        
-        points_before = len(xyz)
         xyz = xyz[angles < angle_cutoff_deg]
         
         if len(xyz) < 10:
-            angle_filtered_pings += 1
             continue
-        # ------------------------------------------
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(xyz)
 
-        # SENSOR → VEHICLE
         pcd.transform(T_S2V)
-
-        # VEHICLE → WORLD (UTM ABSOLUTE)
-        pos_local = interp_pos(ts)         # [north, east, depth]
+        pos_local = interp_pos(ts)         
         rot_nav = slerp_rot(ts).as_matrix()
 
-        R_fix = R.from_euler('z', np.pi).as_matrix()
-
-        rot = R_fix @ rot_nav
-        pos_utm = np.array([
-            X0_UTM + pos_local[1],   # east  → X
-            Y0_UTM + pos_local[0],   # north → Y
-            -pos_local[2]            # depth → Z (ENU)
+        # Matriz de Body ENU (ROS FLU) a Body NED (FRD)
+        T_flu2frd = np.array([
+            [1,  0,  0],
+            [0, -1,  0],
+            [0,  0, -1]
+        ])
+        
+        # Matriz de World NED a World ENU
+        T_ned2enu = np.array([
+            [0,  1,  0],
+            [1,  0,  0],
+            [0,  0, -1]
         ])
 
+        rot = T_ned2enu @ rot_nav @ T_flu2frd
+
+        pos_utm = np.array([X0_UTM + pos_local[1], Y0_UTM + pos_local[0], -pos_local[2]])
         T_world = get_transform_matrix(pos_utm, rot)
         pcd.transform(T_world)
 
@@ -215,15 +197,8 @@ def main():
 
     bag.close()
 
-    # --- DIAGNOSTIC REPORT ---
-    rospy.loginfo(f"Read summary: {total_pings} pings processed.")
-    if out_of_time_pings > 0:
-        rospy.logwarn(f"-> {out_of_time_pings} pings discarded due to lack of synchronized navigation.")
-    if angle_filtered_pings > 0:
-        rospy.logwarn(f"-> {angle_filtered_pings} pings removed by the extreme angular filter.")
-
     if not buffer_points:
-        rospy.logerr("FATAL ERROR: The point list is empty. Aborting to prevent system crash.")
+        rospy.logerr("FATAL ERROR: The point list is empty.")
         return
 
     # -----------------------------------------------------
@@ -232,7 +207,6 @@ def main():
     pts_all = np.vstack(buffer_points)
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts_all)
-
     pcd, _ = pcd.remove_statistical_outlier(sor_k, sor_std)
 
     if voxel_size > 0:
@@ -254,44 +228,43 @@ def main():
     rospy.loginfo("Estimating normals...")
     normal_radius = rospy.get_param('~normal_radius', 0.5)
     pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(
-            radius=normal_radius,
-            max_nn=100
-        )
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=100)
     )
 
-    # Orient normals upwards 
     pcd.orient_normals_to_align_with_direction([0.0, 0.0, 1.0])
-
-    rospy.loginfo(f"Total points in the cloud: {len(pcd.points)}")
-    
-    rospy.loginfo("Cleaning outlier points...")
     pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-    rospy.loginfo(f"Points after cleaning: {len(pcd.points)}")
 
-    # --- INCREASE RESOLUTION  ---
+    # --- POISSON RECONSTRUCTION ---
     poisson_depth = rospy.get_param('~poisson_depth', 11) 
     rospy.loginfo(f"Starting Poisson with depth={poisson_depth}...")
-    
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=poisson_depth)
     rospy.loginfo("✔ Poisson finished.")
 
-    # --- DENSITY FILTERING  ---
-    rospy.loginfo("Cropping edges extrapolated by Poisson...")
+    # --- IMPROVED DENSITY FILTERING ---
+    rospy.loginfo(f"Cropping outer edges (Density Percentile: {density_percentile}%)...")
     densities = np.asarray(densities)
     
-    density_threshold = np.percentile(densities, 2) 
-    
+    density_threshold = np.percentile(densities, density_percentile) 
     vertices_to_remove = densities < density_threshold
     mesh.remove_vertices_by_mask(vertices_to_remove)
     
-    # Clean residual artifacts
+    # --- ISOLATED CLUSTER REMOVAL ---
+    rospy.loginfo("Removing small isolated mesh clusters...")
+    triangle_clusters, cluster_n_triangles, _ = mesh.cluster_connected_triangles()
+    triangle_clusters = np.asarray(triangle_clusters)
+    cluster_n_triangles = np.asarray(cluster_n_triangles)
+    
+    if len(cluster_n_triangles) > 0:
+        largest_cluster_idx = cluster_n_triangles.argmax()
+        triangles_to_remove = triangle_clusters != largest_cluster_idx
+        mesh.remove_triangles_by_mask(triangles_to_remove)
+        mesh.remove_unreferenced_vertices()
+
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
 
-    # 4. Crop mesh by the original Bounding Box 
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
         
@@ -299,6 +272,21 @@ def main():
     vertices = np.asarray(mesh.vertices) + centroid
     mesh.vertices = o3d.utility.Vector3dVector(vertices)
     mesh.compute_vertex_normals()
+
+    # --- COLORMAP ---
+    rospy.loginfo(f"Applying depth colormap ({cmap_name})...")
+    elevations = vertices[:, 2]
+    e_min, e_max = elevations.min(), elevations.max()
+    
+    if e_max > e_min:
+        vmin, vmax = np.percentile(elevations, (1, 99))
+        norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+        try:
+            cmap = mpl.colormaps[cmap_name]
+        except KeyError:
+            cmap = mpl.colormaps['viridis']
+        vertex_colors_rgba = cmap(norm(elevations))
+        mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors_rgba[:, :3])
 
     rospy.loginfo("Saving mesh...")
     mesh_file = os.path.join(output_dir, "mb_mesh.ply")
@@ -308,7 +296,6 @@ def main():
     time.sleep(0.5)
     pub_mb_done.publish(True)
     rospy.loginfo("Multibeam completion signal sent.")
-
 
 if __name__ == '__main__':
     main()

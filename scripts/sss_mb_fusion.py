@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+Author: Antoni Martorell
+Affiliation: Systems, Robotics and Vision Group (SRV),
+             University of the Balearic Islands (UIB)
+Contact: antoni.martorell@uib.es
+License: This code is provided for research and academic purposes.
+"""
 
 import rospy
 import os
