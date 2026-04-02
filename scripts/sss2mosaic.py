@@ -3,57 +3,31 @@
 Author: Antoni Martorell
 Affiliation: Systems, Robotics and Vision Group (SRV),
              University of the Balearic Islands (UIB)
-Contact: antoni.martorell@uib.es
-License: This code is provided for research and academic purposes.
 """
 
-import rospy  # ADDED FOR ROS
+import rospy
 import rosbag
 import numpy as np
 import cv2
-import os     # ADDED TO HANDLE PATHS
+import os
 from scipy.interpolate import interp1d
 import rasterio
 from rasterio.transform import from_origin
 from pyproj import Transformer
-import tf.transformations as tr   
+import tf.transformations as tr
 from std_msgs.msg import Bool
 import time
 
 # ================= CONFIGURATION =================
-# Static paths have been removed. Now read via ROS parameters.
-BASE_FRAME = 'sparus2/base_link'
-SSS_FRAME  = 'sparus2/sidescan'
-
 SONAR_RANGE = 30.0
 MOSAIC_RES  = 0.07
 BLIND_ZONE  = 0.2
 
-# === Coordinate Reference Systems ===
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM   = "EPSG:32631"
-
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
 
-# ================= TF UTIL =================
-
-def get_static_tf(bag, parent_frame, child_frame):
-    for _, msg, _ in bag.read_messages(topics=['/tf_static', '/tf']):
-        for t in msg.transforms:
-            if (t.header.frame_id == parent_frame and
-                t.child_frame_id == child_frame):
-
-                q = t.transform.rotation
-                p = t.transform.translation
-
-                T = tr.quaternion_matrix([q.x, q.y, q.z, q.w])
-                T[:3, 3] = [p.x, p.y, p.z]
-                return T
-
-    raise RuntimeError(f"TF {parent_frame} → {child_frame} not found in bag")
-
 # ================= IMAGE UTILITIES =================
-
 def enhance_data(img_input):
     if img_input is None or img_input.size == 0:
         return np.zeros_like(img_input, dtype=np.uint8)
@@ -74,65 +48,98 @@ def enhance_data(img_input):
     kernel = np.array([[0, -1, 0],
                        [-1, 5, -1],
                        [0, -1, 0]])
+
     return cv2.filter2D(img, -1, kernel)
 
-# ================= NAVIGATION =================
+# ================= TF =================
+def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
+    try:
+        bag = rosbag.Bag(bag_file)
 
-def get_nav_origin(bag, nav_topic): # ADDED nav_topic ARGUMENT
+        for _, msg, _ in bag.read_messages(topics=['/tf_static', '/tf']):
+            for transform in msg.transforms:
+
+                if (transform.header.frame_id == parent_frame and
+                        transform.child_frame_id == child_frame):
+
+                    q = transform.transform.rotation
+                    t = transform.transform.translation
+
+                    T = tr.quaternion_matrix([q.x, q.y, q.z, q.w])
+                    T[:3, 3] = [t.x, t.y, t.z]
+
+                    bag.close()
+                    return T
+
+        bag.close()
+
+    except Exception:
+        pass
+
+    return np.identity(4)
+
+# ================= NAVIGATION =================
+def get_nav_origin(bag, nav_topic):
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
         if hasattr(msg, 'origin'):
-            lat0 = msg.origin.latitude
-            lon0 = msg.origin.longitude
-            rospy.loginfo(f"✔ Navigation origin detected: lat={lat0}, lon={lon0}")
-            return lat0, lon0
+            return msg.origin.latitude, msg.origin.longitude
+
     raise RuntimeError("Navigation geographic origin not found")
 
-
-def get_nav_data(bag, nav_topic): # ADDED nav_topic ARGUMENT
-    ts, north, east, yaw, alt = [], [], [], [], []
+def get_nav_data(bag, nav_topic):
+    ts, north, east, yaw, pitch, roll, alt = [], [], [], [], [], [], []
 
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
         ts.append(msg.header.stamp.to_sec())
         north.append(msg.position.north)
         east.append(msg.position.east)
         yaw.append(msg.orientation.yaw)
+        pitch.append(msg.orientation.pitch)
+        roll.append(msg.orientation.roll)
         alt.append(msg.altitude)
 
     ts = np.array(ts)
     idx = np.argsort(ts)
 
-    ts    = ts[idx]
+    ts = ts[idx]
     north = np.array(north)[idx]
-    east  = np.array(east)[idx]
+    east = np.array(east)[idx]
+
     yaw   = np.unwrap(np.array(yaw)[idx])
+    pitch = np.unwrap(np.array(pitch)[idx])
+    roll  = np.unwrap(np.array(roll)[idx])
     alt   = np.array(alt)[idx]
 
     f_n = interp1d(ts, north, bounds_error=False, fill_value=np.nan)
     f_e = interp1d(ts, east,  bounds_error=False, fill_value=np.nan)
     f_y = interp1d(ts, yaw,   bounds_error=False, fill_value=np.nan)
+    f_p = interp1d(ts, pitch, bounds_error=False, fill_value=np.nan)
+    f_r = interp1d(ts, roll,  bounds_error=False, fill_value=np.nan)
     f_h = interp1d(ts, alt,   bounds_error=False, fill_value=np.nan)
 
-    return (f_n, f_e, f_y, f_h), (ts[0], ts[-1])
+    return (f_n, f_e, f_y, f_p, f_r, f_h), (ts[0], ts[-1])
 
-# ================= SSS MOSAIC =================
+# ================= MOSAIC =================
+def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
-def process_mosaic(bag, nav, time_range, off_x, off_y):
-    f_n, f_e, f_y, f_h = nav
+    f_n, f_e, f_y, f_p, f_r, f_h = nav
     t0, t1 = time_range
 
     ts_samples = np.linspace(t0, t1, 500)
-    east_samples  = f_e(ts_samples)
+
+    east_samples = f_e(ts_samples)
     north_samples = f_n(ts_samples)
 
     valid = ~np.isnan(east_samples) & ~np.isnan(north_samples)
-    min_e, max_e = np.min(east_samples[valid]), np.max(east_samples[valid])
-    min_n, max_n = np.min(north_samples[valid]), np.max(north_samples[valid])
 
     margin = SONAR_RANGE + 5.0
-    x_min, x_max = min_e - margin, max_e + margin
-    y_min, y_max = min_n - margin, max_n + margin
 
-    width  = int(np.ceil((x_max - x_min) / MOSAIC_RES))
+    x_min = np.min(east_samples[valid]) - margin
+    x_max = np.max(east_samples[valid]) + margin
+    y_min = np.min(north_samples[valid]) - margin
+    y_max = np.max(north_samples[valid]) + margin
+
+    width = int(np.ceil((x_max - x_min) / MOSAIC_RES))
     height = int(np.ceil((y_max - y_min) / MOSAIC_RES))
 
     grid = np.zeros(width * height, dtype=np.float32)
@@ -144,10 +151,8 @@ def process_mosaic(bag, nav, time_range, off_x, off_y):
         return c, r
 
     info = bag.get_type_and_topic_info()
-    sss_topics = [
-    t for t, v in info.topics.items()
-    if "sidescan" in t.lower() and "Image" in v.msg_type
-    ]
+    sss_topics = [t for t, v in info.topics.items()
+                  if "sidescan" in t.lower() and "Image" in v.msg_type]
 
     for topic, msg, _ in bag.read_messages(topics=sss_topics):
 
@@ -159,68 +164,93 @@ def process_mosaic(bag, nav, time_range, off_x, off_y):
         if ts < t0 or ts > t1:
             continue
 
-        n, e = f_n(ts), f_e(ts)
-        yaw, h = f_y(ts), f_h(ts)
-        if np.isnan(n) or np.isnan(e) or h < 0.2:
+        try:
+            n = float(f_n(ts))
+            e = float(f_e(ts))
+            yaw = float(f_y(ts))
+            pitch = float(f_p(ts))
+            roll = float(f_r(ts))
+            h = float(f_h(ts))
+        except:
+            continue
+
+        if np.isnan(n) or np.isnan(e) or np.isnan(yaw) or np.isnan(pitch) or np.isnan(roll) or np.isnan(h):
+            continue
+
+        if h < 0.2:
             continue
 
         scan = np.frombuffer(msg.data, dtype=np.uint8).astype(np.float32)
+
         if "port" in topic.lower():
             scan = scan[::-1]
-            sign = -1
+            T_sensor = T_PORT
         else:
-            sign = 1
+            T_sensor = T_STBD
 
         npx = scan.size
         meters_px = SONAR_RANGE / npx
+
         slant = np.arange(npx) * meters_px
         ground = np.sqrt(np.maximum(slant**2 - h**2, 0.0))
-        valid = ground > BLIND_ZONE
-        if not np.any(valid):
+
+        valid_mask = ground > BLIND_ZONE
+
+        if not np.any(valid_mask):
             continue
 
-        v_fwd_n =  np.cos(yaw)
-        v_fwd_e =  np.sin(yaw)
-        v_right_n = -np.sin(yaw)
-        v_right_e =  np.cos(yaw)
+        R_veh = tr.euler_matrix(roll, pitch, yaw, axes='sxyz')[:3, :3]
+        R_sensor = T_sensor[:3, :3]
 
-        off_n = off_x * v_fwd_n + off_y * v_right_n
-        off_e = off_x * v_fwd_e + off_y * v_right_e
+        R_total = R_veh @ R_sensor
 
-        px_n = (n + off_n) + sign * v_right_n * ground[valid]
-        px_e = (e + off_e) + sign * v_right_e * ground[valid]
+        sensor_offset = T_sensor[:3, 3]
+        sensor_world = R_veh @ sensor_offset
+
+        off_n = sensor_world[0]
+        off_e = sensor_world[1]
+
+        ping_axis = R_total @ np.array([0.0, 1.0, 0.0])
+
+        if "port" in topic.lower():
+            ping_axis = -ping_axis
+
+        v_ping_n = ping_axis[0]
+        v_ping_e = ping_axis[1]
+
+        px_n = (n + off_n) + v_ping_n * ground[valid_mask]
+        px_e = (e + off_e) + v_ping_e * ground[valid_mask]
 
         c, r = to_idx(px_e, px_n)
+
         mask = (c >= 0) & (c < width) & (r >= 0) & (r < height)
+
         idx = r[mask] * width + c[mask]
 
-        np.add.at(grid, idx, scan[valid][mask])
+        np.add.at(grid, idx, scan[valid_mask][mask])
         np.add.at(cnt, idx, 1)
 
     img = np.zeros_like(grid)
-    valid = cnt > 0
-    img[valid] = grid[valid] / cnt[valid]
+
+    valid_pixels = cnt > 0
+    img[valid_pixels] = grid[valid_pixels] / cnt[valid_pixels]
 
     return img.reshape((height, width)), x_min, y_max
 
 # ================= MAIN =================
-
 def main():
-    # INITIALIZE ROS NODE
+
     rospy.init_node('sss_mosaic_gen', anonymous=True)
 
-    # READ PARAMETERS FROM LAUNCH FILE
-    bag_file   = rospy.get_param('~bag_file', '')
+    bag_file = rospy.get_param('~bag_file', '')
     output_dir = rospy.get_param('~output_dir', '.')
-    nav_topic  = rospy.get_param('~nav_topic', '/sparus2/navigator/navigation')
+    nav_topic = rospy.get_param('~nav_topic', '/sparus2/navigator/navigation')
 
     if not bag_file:
-        rospy.logerr("ERROR: 'bag_file' not provided. Aborting.")
+        rospy.logerr("ERROR: 'bag_file' not provided.")
         return
 
-    # CREATE OUTPUT FILE PATH
     output_tiff = os.path.join(output_dir, 'sss_mosaic.tif')
-    rospy.loginfo(f"Processing Sidescan from: {bag_file}")
 
     bag = rosbag.Bag(bag_file)
 
@@ -229,11 +259,27 @@ def main():
 
     nav, t_range = get_nav_data(bag, nav_topic)
 
-    T_SSS = get_static_tf(bag, BASE_FRAME, SSS_FRAME)
-    off_x, off_y = T_SSS[0, 3], T_SSS[1, 3]
-    rospy.loginfo(f"✔ SSS offset from TF: x={off_x:.2f}, y={off_y:.2f}")
+    T_PORT = get_static_transform_from_tf(
+        bag_file,
+        'sparus2/base_link',
+        'sparus2/port_sidescan'
+    )
 
-    img, x_min, y_max = process_mosaic(bag, nav, t_range, off_x, off_y)
+    T_STBD = get_static_transform_from_tf(
+        bag_file,
+        'sparus2/base_link',
+        'sparus2/starboard_sidescan'
+    )
+
+    rospy.loginfo("✔ TF loaded from bag")
+
+    img, x_min, y_max = process_mosaic(
+        bag,
+        nav,
+        t_range,
+        T_PORT,
+        T_STBD
+    )
 
     save_geotiff = from_origin(
         X0_UTM + x_min,
@@ -259,12 +305,13 @@ def main():
         dst.write(img8, 1)
 
     bag.close()
-    rospy.loginfo(f"✔ GeoTIFF successfully generated at: {output_tiff}")
+
+    rospy.loginfo(f"✔ GeoTIFF generated: {output_tiff}")
 
     pub_sss_done = rospy.Publisher('/pipeline/sss_done', Bool, queue_size=1, latch=True)
+
     time.sleep(0.5)
     pub_sss_done.publish(True)
-    rospy.loginfo("Sidescan completion signal sent.")
 
 if __name__ == "__main__":
     main()
