@@ -5,25 +5,34 @@ import rosbag
 import numpy as np
 import cv2
 import os
+
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
+
 import rasterio
 from rasterio.transform import from_origin
 from pyproj import Transformer
 import tf.transformations as tr
+
 from std_msgs.msg import Bool
 import time
 
-# ================= CONFIGURATION =================
-SONAR_RANGE = 30.0
+# =========================================================
+# SONAR CONFIGURATION
+# =========================================================
+SONAR_RANGE = 30.0                
+VERTICAL_APERTURE_DEG = 45.0      
+BLIND_ZONE = 1
 MOSAIC_RES = 0.07
-BLIND_ZONE = 0.2
 
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM = "EPSG:32631"
+
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
 
-# ================= IMAGE ENHANCEMENT =================
+# =========================================================
+# ENHANCEMENT
+# =========================================================
 def enhance_data(img_input):
 
     if img_input is None or img_input.size == 0:
@@ -37,6 +46,7 @@ def enhance_data(img_input):
     vmax = max(vmax, vmin + 1e-6)
 
     img = np.clip((img_input - vmin) * 255.0 / (vmax - vmin), 0, 255).astype(np.uint8)
+
     img = cv2.medianBlur(img, 5)
 
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
@@ -50,7 +60,9 @@ def enhance_data(img_input):
 
     return cv2.filter2D(img, -1, kernel)
 
-# ================= TF =================
+# =========================================================
+# TF
+# =========================================================
 def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
 
     bag = rosbag.Bag(bag_file)
@@ -72,7 +84,9 @@ def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
     bag.close()
     return np.identity(4)
 
-# ================= NAVIGATION =================
+# =========================================================
+# NAVIGATION
+# =========================================================
 def get_nav_origin(bag, nav_topic):
 
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
@@ -88,6 +102,7 @@ def get_nav_data(bag, nav_topic):
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
 
         ts.append(msg.header.stamp.to_sec())
+
         north.append(msg.position.north)
         east.append(msg.position.east)
 
@@ -101,12 +116,11 @@ def get_nav_data(bag, nav_topic):
     idx = np.argsort(ts)
 
     ts = ts[idx]
+
     north = np.array(north)[idx]
     east = np.array(east)[idx]
 
-    yaw = np.unwrap(np.array(yaw)[idx])
-    yaw = gaussian_filter1d(yaw, sigma=2)
-
+    yaw = gaussian_filter1d(np.unwrap(np.array(yaw)[idx]), sigma=2)
     pitch = np.unwrap(np.array(pitch)[idx])
     roll = np.unwrap(np.array(roll)[idx])
 
@@ -123,7 +137,9 @@ def get_nav_data(bag, nav_topic):
 
     return (f_n, f_e, f_y, f_p, f_r, f_h), (ts[0], ts[-1])
 
-# ================= MOSAIC =================
+# =========================================================
+# MOSAIC
+# =========================================================
 def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
     f_n, f_e, f_y, f_p, f_r, f_h = nav
@@ -173,16 +189,21 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
         n = float(f_n(ts))
         e = float(f_e(ts))
+
         yaw = float(f_y(ts))
+        pitch = float(f_p(ts))
+        roll = float(f_r(ts))
+
         h = float(f_h(ts))
 
-        if np.isnan(n) or np.isnan(e) or np.isnan(yaw) or np.isnan(h):
+        if np.isnan(n) or np.isnan(e) or np.isnan(yaw):
             continue
 
         if h < 0.2:
             continue
 
         scan = np.frombuffer(msg.data, dtype=np.uint8).astype(np.float32)
+        scan = gaussian_filter1d(scan, sigma=1.2)
 
         if "port" in topic.lower():
             scan = scan[::-1]
@@ -190,36 +211,70 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
         else:
             T_sensor = T_STBD
 
+
+        R_sensor = T_sensor[:3, :3]
+        sensor_offset = T_sensor[:3, 3]
+
         npx = scan.size
-        meters_px = SONAR_RANGE / npx
+        slant = np.linspace(0, SONAR_RANGE, npx)
 
-        slant = np.arange(npx) * meters_px
-        ground = np.sqrt(np.maximum(slant**2 - h**2, 0.0))
-
-        valid_mask = ground > BLIND_ZONE
+        valid_mask = slant > BLIND_ZONE
 
         if not np.any(valid_mask):
             continue
 
-        sensor_offset = T_sensor[:3, 3]
+        # ==========================================
+        # VEHICLE ROTATION
+        # ==========================================
+        R_veh = tr.euler_matrix(
+            roll,
+            pitch,
+            yaw,
+            axes='sxyz'
+        )[:3, :3]
 
-        off_n = sensor_offset[0] * np.cos(yaw) - sensor_offset[1] * np.sin(yaw)
-        off_e = sensor_offset[0] * np.sin(yaw) + sensor_offset[1] * np.cos(yaw)
+        # ==========================================
+        # SENSOR OFFSET WORLD
+        # ==========================================
+        sensor_world = R_veh @ sensor_offset
 
-        # SIGNOS CORREGIDOS
+        sensor_n = n + sensor_world[0]
+        sensor_e = e + sensor_world[1]
+
+        # ==========================================
+        # SIDESCAN LATERAL AXIS
+        # ==========================================
         if "port" in topic.lower():
-            v_ping_n = np.sin(yaw)
-            v_ping_e = -np.cos(yaw)
+            dir_n = np.sin(yaw)
+            dir_e = -np.cos(yaw)
         else:
-            v_ping_n = -np.sin(yaw)
-            v_ping_e = np.cos(yaw)
+            dir_n = -np.sin(yaw)
+            dir_e = np.cos(yaw)
 
-        px_n = (n + off_n) + v_ping_n * ground[valid_mask]
-        px_e = (e + off_e) + v_ping_e * ground[valid_mask]
+        # ==========================================
+        # SLANT TO GROUND RANGE
+        # ==========================================
+        mount_angle = np.deg2rad(20.0)
+
+        effective_h = h / np.cos(mount_angle)
+
+        ground = np.sqrt(
+            np.maximum(slant[valid_mask]**2 - effective_h**2, 0.0)
+        )
+        # ==========================================
+        # PROJECT PIXELS
+        # ==========================================
+        px_n = sensor_n + dir_n * ground
+        px_e = sensor_e + dir_e * ground
 
         c, r = to_idx(px_e, px_n)
 
-        mask = (c >= 0) & (c < width) & (r >= 0) & (r < height)
+        mask = (
+            (c >= 0) &
+            (c < width) &
+            (r >= 0) &
+            (r < height)
+        )
 
         idx = r[mask] * width + c[mask]
 
@@ -233,17 +288,19 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
     return img.reshape((height, width)), x_min, y_max
 
-# ================= MAIN =================
+# =========================================================
+# MAIN
+# =========================================================
 def main():
 
-    rospy.init_node('sss_mosaic_gen', anonymous=True)
+    rospy.init_node('sss_mosaic_gen')
 
     bag_file = rospy.get_param('~bag_file', '')
     output_dir = rospy.get_param('~output_dir', '.')
     nav_topic = rospy.get_param('~nav_topic', '/sparus2/navigator/navigation')
 
     if not bag_file:
-        rospy.logerr("ERROR: bag_file not provided")
+        rospy.logerr("bag_file missing")
         return
 
     output_tiff = os.path.join(output_dir, 'sss_mosaic.tif')
@@ -275,15 +332,29 @@ def main():
         T_STBD
     )
 
-    save_geotiff = from_origin(
+    transform = from_origin(
         X0_UTM + x_min,
         Y0_UTM + y_max,
         MOSAIC_RES,
         MOSAIC_RES
     )
 
+    # =========================================================
+    # ENHANCE IMAGE
+    # =========================================================
     img8 = enhance_data(img)
 
+    # Mantener fondo completamente vacío
+    img8[img == 0] = 0
+
+    # =========================================================
+    # TRANSPARENCY MASK
+    # =========================================================
+    alpha_mask = np.where(img8 > 0, 255, 0).astype(np.uint8)
+
+    # =========================================================
+    # SAVE GEOTIFF WITH TRANSPARENCY
+    # =========================================================
     with rasterio.open(
         output_tiff,
         'w',
@@ -293,19 +364,25 @@ def main():
         count=1,
         dtype=np.uint8,
         crs=CRS_UTM,
-        transform=save_geotiff,
-        compress='deflate'
+        transform=transform,
+        compress='deflate',
+        nodata=0,
+        photometric='MINISBLACK'
+
     ) as dst:
+
         dst.write(img8, 1)
+
+        dst.write_mask(alpha_mask)
 
     bag.close()
 
-    rospy.loginfo(f"GeoTIFF generated: {output_tiff}")
+    rospy.loginfo(f"GeoTIFF generado: {output_tiff}")
 
-    pub_sss_done = rospy.Publisher('/pipeline/sss_done', Bool, queue_size=1, latch=True)
+    pub = rospy.Publisher('/pipeline/sss_done', Bool, queue_size=1, latch=True)
 
     time.sleep(0.5)
-    pub_sss_done.publish(True)
+    pub.publish(True)
 
 if __name__ == "__main__":
     main()

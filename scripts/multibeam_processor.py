@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 Multibeam Point Cloud Processing and Surface Reconstruction
-Fully aligned with sss2mosaic.py + automatic MB→SSS lever-arm correction
-
-Author: Antoni Martorell
+Geometry corrected for exact consistency with sss2mosaic.py
 """
 
 import rospy
@@ -20,10 +18,11 @@ from std_msgs.msg import Bool
 import time
 
 # =========================================================
-# CRS CONFIG
+# CRS
 # =========================================================
 CRS_WGS84 = "EPSG:4326"
-CRS_UTM   = "EPSG:32631"
+CRS_UTM = "EPSG:32631"
+
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
 
 # =========================================================
@@ -68,17 +67,15 @@ def main():
 
     rospy.init_node('multibeam_processor')
 
-    rospy.loginfo("===== MULTIBEAM PROCESSOR STARTED =====")
-
-    bag_file   = rospy.get_param('~bag_file')
+    bag_file = rospy.get_param('~bag_file')
     scan_topic = rospy.get_param('~scan_topic')
-    nav_topic  = rospy.get_param('~nav_topic')
+    nav_topic = rospy.get_param('~nav_topic')
     output_dir = rospy.get_param('~output_dir')
 
     voxel_size = rospy.get_param('~voxel_size', 0.05)
-    sor_k      = rospy.get_param('~sor_k', 50)
-    sor_std    = rospy.get_param('~sor_std', 1.0)
-    angle_cutoff_deg = rospy.get_param('~angle_cutoff', 60.0)
+    sor_k = rospy.get_param('~sor_k', 50)
+    sor_std = rospy.get_param('~sor_std', 1.0)
+    angle_cutoff_deg = rospy.get_param('~angle_cutoff', 50.0)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -90,8 +87,6 @@ def main():
     lat0, lon0 = get_nav_origin(bag, nav_topic)
     X0_UTM, Y0_UTM = ll_to_utm.transform(lon0, lat0)
 
-    rospy.loginfo(f"UTM origin: {X0_UTM:.3f}, {Y0_UTM:.3f}")
-
     # =====================================================
     # TF MULTIBEAM
     # =====================================================
@@ -101,34 +96,10 @@ def main():
         'sparus2/multibeam'
     )
 
-    # =====================================================
-    # TF SIDESCAN
-    # =====================================================
-    T_PORT = get_static_transform_from_tf(
-        bag_file,
-        'sparus2/base_link',
-        'sparus2/sidescan_port'
-    )
-
-    T_STBD = get_static_transform_from_tf(
-        bag_file,
-        'sparus2/base_link',
-        'sparus2/sidescan_starboard'
-    )
-
     R_sensor = T_MB[:3, :3]
-    sensor_offset = T_MB[:3, 3]
+    sensor_offset = T_MB[:3,3] + np.array([0.0, -0.5, 0.0])
 
-    # =====================================================
-    # AUTOMATIC MB→SSS LEVER ARM
-    # =====================================================
-    sss_center = 0.5 * (T_PORT[:3, 3] + T_STBD[:3, 3])
-
-    delta_sensor = (sss_center - sensor_offset) + np.array([0.0, -2, 0.0])
-
-    rospy.loginfo(f"MB offset      : {sensor_offset}")
-    rospy.loginfo(f"SSS center     : {sss_center}")
-    rospy.loginfo(f"Lever-arm delta: {delta_sensor}")
+    rospy.loginfo(f"MB sensor offset: {sensor_offset}")
 
     # =====================================================
     # NAVIGATION
@@ -166,20 +137,12 @@ def main():
     # =====================================================
     # PROCESS
     # =====================================================
-    rospy.loginfo("Processing multibeam pings...")
-
     buffer_points = []
-    count = 0
 
     for _, scan, _ in bag.read_messages(topics=[scan_topic]):
 
         if not hasattr(scan, 'header'):
             continue
-
-        count += 1
-
-        if count % 100 == 0:
-            rospy.loginfo(f"Pings processed: {count}")
 
         ts = scan.header.stamp.to_sec()
 
@@ -200,10 +163,16 @@ def main():
         if len(pc) < 10:
             continue
 
+        # ===============================================
+        # RAW SENSOR FRAME
+        # ===============================================
         xyz = np.column_stack((pc['x'], -pc['y'], -pc['z']))
 
-        r_horizontal = np.sqrt(xyz[:,0]**2 + xyz[:,1]**2)
-        depth_s = np.abs(xyz[:,2])
+        # ===============================================
+        # ANGLE FILTER
+        # ===============================================
+        r_horizontal = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)
+        depth_s = np.abs(xyz[:, 2])
 
         angles = np.degrees(np.arctan2(r_horizontal, depth_s))
         xyz = xyz[angles < angle_cutoff_deg]
@@ -211,14 +180,17 @@ def main():
         if len(xyz) < 10:
             continue
 
-        # =================================================
-        # SENSOR ROTATION
-        # =================================================
+        # ===============================================
+        # SENSOR TF
+        # ===============================================
         xyz = xyz @ R_sensor.T
 
-        # =================================================
+        # sensor offset BEFORE vehicle rotation
+        # xyz += sensor_offset
+
+        # ===============================================
         # VEHICLE ROTATION
-        # =================================================
+        # ===============================================
         R_veh = tr.euler_matrix(
             roll_t,
             pitch_t,
@@ -228,43 +200,28 @@ def main():
 
         xyz = xyz @ R_veh.T
 
-        # =================================================
-        # OFFSET identical to SSS
-        # =================================================
-        offset_world = R_veh @ sensor_offset
+        # ===============================================
+        # NAVIGATION FRAME
+        # ===============================================
+        xyz[:, 0] += n
+        xyz[:, 1] += e
+        xyz[:, 2] += -d
 
-        delta_world = R_veh @ delta_sensor
-
-        offset_world += delta_world
-
-        xyz[:,0] += offset_world[0]
-        xyz[:,1] += offset_world[1]
-        xyz[:,2] += offset_world[2]
-
-        # =================================================
-        # LOCAL WORLD
-        # =================================================
-        xyz[:,0] += n
-        xyz[:,1] += e
-        xyz[:,2] += -d
-
-        # =================================================
+        # ===============================================
         # UTM
-        # =================================================
+        # ===============================================
         pts_world = np.zeros_like(xyz)
 
-        pts_world[:,0] = X0_UTM + xyz[:,1]
-        pts_world[:,1] = Y0_UTM + xyz[:,0]
-        pts_world[:,2] = xyz[:,2]
+        pts_world[:, 0] = X0_UTM + xyz[:, 1]
+        pts_world[:, 1] = Y0_UTM + xyz[:, 0]
+        pts_world[:, 2] = xyz[:, 2]
 
         buffer_points.append(pts_world)
 
     bag.close()
 
-    rospy.loginfo(f"Valid pings: {len(buffer_points)}")
-
     if not buffer_points:
-        rospy.logerr("No valid points")
+        rospy.logerr("No valid multibeam points")
         return
 
     # =====================================================
@@ -281,8 +238,6 @@ def main():
     xyz_file = os.path.join(output_dir, "mb_pointcloud.xyz")
     o3d.io.write_point_cloud(xyz_file, pcd, write_ascii=True)
 
-    rospy.loginfo(f"XYZ saved: {xyz_file}")
-
     # =====================================================
     # MESH
     # =====================================================
@@ -293,27 +248,24 @@ def main():
     pts_centered = pts - centroid
     pcd.points = o3d.utility.Vector3dVector(pts_centered)
 
-    normal_radius = voxel_size * 3.0
-
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(
-            radius=normal_radius,
+            radius=voxel_size * 3.0,
             max_nn=80
         )
     )
 
     pcd.orient_normals_consistent_tangent_plane(50)
-    pcd.orient_normals_to_align_with_direction([0,0,1])
+    pcd.orient_normals_to_align_with_direction([0, 0, 1])
 
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd,
-        depth=11
+        depth=10
     )
 
     densities = np.asarray(densities)
 
     threshold = np.percentile(densities, 5)
-
     mesh.remove_vertices_by_mask(densities < threshold)
 
     vertices = np.asarray(mesh.vertices) + centroid
@@ -324,14 +276,13 @@ def main():
     mesh_file = os.path.join(output_dir, "mb_mesh.ply")
     o3d.io.write_triangle_mesh(mesh_file, mesh)
 
-    rospy.loginfo(f"Mesh saved: {mesh_file}")
-
-    pub_mb_done = rospy.Publisher('/pipeline/mb_done', Bool, queue_size=1, latch=True)
+    pub = rospy.Publisher('/pipeline/mb_done', Bool, queue_size=1, latch=True)
 
     time.sleep(0.5)
-    pub_mb_done.publish(True)
+    pub.publish(True)
 
-    rospy.loginfo("===== MULTIBEAM FINISHED =====")
+    rospy.loginfo("Multibeam processing finished")
 
 if __name__ == '__main__':
     main()
+
