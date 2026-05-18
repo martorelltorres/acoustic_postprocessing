@@ -2,7 +2,13 @@
 """
 Multibeam Point Cloud Processing and Surface Reconstruction
 Geometry corrected for exact consistency with sss2mosaic.py
+Author: Antoni Martorell
+Affiliation: Systems, Robotics and Vision Group (SRV),
+             University of the Balearic Islands (UIB)
+Contact: antoni.martorell@uib.es
+License: This code is provided for research and academic purposes.
 """
+
 
 import rospy
 import rosbag
