@@ -42,7 +42,7 @@
         <param name="sor_std" value="$(arg sor_std)"/>
         <param name="voxel_size" value="$(arg voxel_size)"/>
     </node> -->
-    <node   pkg="acoustic_postprocessing"    type="multibeam_loop_closure.py"    name="mb_icp_proc"    output="screen">
+    <node   pkg="acoustic_postprocessing"    type="multibeam_slam.py"    name="mb_slam"    output="screen">
         <param name="bag_file"      value="$(arg mb_bagfile)" />
         <param name="scan_topic"    value="/sparus2/norbit_wbms_multibeam/multibeam_scan" />
         <param name="nav_topic"     value="/sparus2/navigator/navigation" />

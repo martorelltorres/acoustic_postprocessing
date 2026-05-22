@@ -20,10 +20,10 @@ print("================================================")
 # CONFIGURATION
 # =============================================================================
 
-PATCH_SIZE = 80
-PATCH_STRIDE = 10
+PATCH_SIZE = 100
+PATCH_STRIDE = 20
 
-VOXEL_SIZE = 0.30
+VOXEL_SIZE = 0.60
 FINAL_DOWNSAMPLE = 0.15
 
 ANGLE_CUTOFF_DEG = 50.0
@@ -437,7 +437,7 @@ class PatchBuilder:
 
 def robust_icp(source, target):
 
-    voxel_scales = [1.0, 0.5, 0.25]
+    voxel_scales = [4.0, 2.0, 1.0]
 
     max_corr = [
         ICP_DISTANCE * 2.0,
