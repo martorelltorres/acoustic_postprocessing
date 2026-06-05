@@ -21,12 +21,17 @@ def dynamic_information_matrix(
 
     confidence = np.clip(fitness / rmse, 0.0, 1000.0)
 
+    temporal_distance = max(
+        abs(float(temporal_distance)),
+        1e-3
+    )
+
     if loop:
 
         scale = (
             base_scale *
             confidence *
-            5.0
+            1.0
         )
 
     else:

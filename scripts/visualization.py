@@ -4,6 +4,7 @@ import copy
 import numpy as np
 import open3d as o3d
 import time
+import tf.transformations as tr
 
 
 # =============================================================================
@@ -19,13 +20,16 @@ def build_final_map(
 
     for idx, patch in enumerate(patches):
 
+        if idx >= len(pose_graph.nodes):
+            break
+
+        T = pose_graph.nodes[idx].pose
+
         transformed = copy.deepcopy(
             patch.pcd
         )
 
-        transformed.transform(
-            pose_graph.nodes[idx].pose
-        )
+        transformed.transform(T)
 
         final_map += transformed
 
@@ -175,17 +179,38 @@ def create_loop_lines(
 
 class PoseGraphMonitor:
 
-    def __init__(self):
+    def __init__(
+            self,
+            enabled=True,
+            overview_zoom=0.18,
+            min_zoom=0.03,
+            overview_margin=2.5):
 
         self.vis = o3d.visualization.Visualizer()
 
-        self.vis.create_window(
+        self.active = False
+
+        self.overview_zoom = overview_zoom
+        self.min_zoom = min_zoom
+        self.overview_margin = overview_margin
+
+        if not enabled:
+            return
+
+        self.active = self.vis.create_window(
             window_name="Pose Graph Monitor",
             width=1600,
             height=900
         )
 
+        if not self.active:
+            return
+
         opt = self.vis.get_render_option()
+
+        if opt is None:
+            self.active = False
+            return
 
         opt.background_color = np.array(
             [0.02, 0.02, 0.02]
@@ -202,6 +227,9 @@ class PoseGraphMonitor:
         self.ctr = self.vis.get_view_control()
 
     def update(self, pose_graph):
+
+        if not self.active:
+            return
 
         if len(pose_graph.nodes) < 2:
             return
@@ -330,10 +358,49 @@ class PoseGraphMonitor:
             self.node_geom = node_cloud
 
         # =========================================================
-        # AUTO CAMERA FOLLOW
+        # GLOBAL OVERVIEW CAMERA
+        # =========================================================
+        # Mantiene una vista cenital de toda la trayectoria acumulada.
+        # El zoom queda intencionadamente alejado para observar la
+        # evolución global, no solo la zona local del último nodo.
         # =========================================================
 
-        bbox = self.vis.get_view_control()
+        if len(trajectory) >= 2:
+
+            ctr = self.vis.get_view_control()
+
+            # Centro de la trayectoria completa
+            traj_center = trajectory.mean(axis=0)
+
+            # Apuntar al centro de la trayectoria
+            ctr.set_lookat(traj_center.tolist())
+
+            # Vista cenital (desde arriba, eje Z)
+            ctr.set_up([0, 1, 0])
+            ctr.set_front([0, 0, 1])
+
+            xy_extent = np.ptp(
+                trajectory[:, :2],
+                axis=0
+            )
+
+            scene_extent = max(
+                float(np.max(xy_extent)),
+                1.0
+            )
+
+            zoom = self.overview_zoom / (
+                1.0 + scene_extent / 100.0
+            )
+
+            zoom /= self.overview_margin
+
+            zoom = max(
+                self.min_zoom,
+                min(self.overview_zoom, zoom)
+            )
+
+            ctr.set_zoom(zoom)
 
         self.vis.poll_events()
         self.vis.update_renderer()
@@ -342,5 +409,5 @@ class PoseGraphMonitor:
 
     def close(self):
 
-        self.vis.destroy_window()
-
+        if self.active:
+            self.vis.destroy_window()
