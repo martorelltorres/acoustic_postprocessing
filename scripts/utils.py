@@ -112,7 +112,8 @@ def ins_rotation_icp_translation(
         max_translation=5,
         min_length_ratio=None,
         max_length_ratio=None,
-        anchor_scale=False):
+        anchor_scale=False,
+        cross_track_gain=1.0):
     """
     Construye una transformación SE(3) tomando la ROTACIÓN COMPLETA de la
     navegación INS (``T_init``) y la TRASLACIÓN del resultado ICP (``T_icp``),
@@ -140,6 +141,19 @@ def ins_rotation_icp_translation(
       solo aporta dirección (corrige el sesgo de compresión del ICP).
     - Gate de longitud (Fix A): si ``anchor_scale=False``, solo se reescala a la
       INS cuando el ratio |T_icp_xy|/|T_init_xy| sale de la banda.
+
+    Opción A1 — amortiguación de la corrección cross-track (``cross_track_gain``):
+    La traslación XY del ICP se descompone en ALONG-TRACK (dirección de avance de
+    la INS) y CROSS-TRACK (perpendicular). La componente cross-track del ICP
+    introduce un sesgo lateral sistemático (medido +23 mm/paso en los giros,
+    siempre hacia +East) que corre el patrón del lawnmower y produce el efecto
+    "se contrae a la izquierda, se sobrepasa a la derecha". Con la INS fiable en
+    heading, esa corrección lateral solo añade error. ``cross_track_gain`` escala
+    SOLO la componente cross-track:
+      gain=1.0 → corrección lateral plena del ICP (comportamiento previo)
+      gain<1.0 → amortigua el sesgo lateral
+      gain=0.0 → along-track del ICP + cross-track de la INS (sin sesgo lateral)
+    El along-track (escala de avance) se conserva intacto.
 
     Salida: SE(3) (matriz 4x4) con la rotación 3D de la INS.
     """
@@ -184,6 +198,19 @@ def ins_rotation_icp_translation(
 
                 # Conserva la dirección del ICP, magnitud de la INS.
                 icp_xy = icp_xy * (ins_len / icp_len)
+
+    # Opción A1 — amortiguar la componente cross-track (lateral) del ICP.
+    # Descompone la traslación corregida en along-track (dirección INS) y
+    # cross-track (perpendicular) y reescala solo la lateral por cross_track_gain.
+    if cross_track_gain != 1.0 and ins_len > 1e-6:
+
+        ins_dir = ins_xy / ins_len
+        cross_dir = np.array([-ins_dir[1], ins_dir[0]])
+
+        along = float(np.dot(icp_xy, ins_dir))
+        cross = float(np.dot(icp_xy, cross_dir))
+
+        icp_xy = along * ins_dir + (cross_track_gain * cross) * cross_dir
 
     tx = np.clip(
         icp_xy[0],

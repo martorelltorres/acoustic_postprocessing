@@ -182,6 +182,21 @@ MAX_SEQ_ICP_LENGTH_RATIO = 1.15
 SEQ_ANCHOR_SCALE = False
 
 # -----------------------------------------------------------------------------
+# GANANCIA CROSS-TRACK DE LA CORRECCIÓN ICP  (Opción A1)
+# -----------------------------------------------------------------------------
+# La traslación XY del ICP se descompone en along-track (avance, dirección INS) y
+# cross-track (lateral, perpendicular). La componente cross-track del ICP mete un
+# sesgo lateral sistemático (+23 mm/paso en los giros, siempre hacia +East) que
+# corre el patrón del lawnmower: se contrae a la izquierda y se sobrepasa a la
+# derecha, error que crece con la misión. Con la INS fiable en heading, esa
+# corrección lateral solo añade error.
+#   1.0 = corrección lateral plena del ICP
+#   0.0 = along-track del ICP + cross-track de la INS (sin sesgo lateral)
+# Se mantiene el along-track del ICP (refina la escala de avance donde hay
+# estructura); solo se amortigua la lateral.
+SEQ_CROSS_TRACK_GAIN = 0.0
+
+# -----------------------------------------------------------------------------
 # HIGH-CONFIDENCE FALLBACK
 # -----------------------------------------------------------------------------
 # If fitness is extremely high and correspondences are massive,
@@ -1449,7 +1464,7 @@ def main():
 
     global MAX_SEQ_ICP_TRANSLATION_DEV, MAX_SEQ_ICP_YAW_DEV
     global MIN_SEQ_ICP_LENGTH_RATIO, MAX_SEQ_ICP_LENGTH_RATIO
-    global SEQ_ANCHOR_SCALE
+    global SEQ_ANCHOR_SCALE, SEQ_CROSS_TRACK_GAIN
     global MAX_LOOP_INS_DISTANCE, MIN_LOOP_ICP_INS_RATIO, MIN_INS_DIST_FOR_RATIO_CHECK
     global MIN_LOOP_TEMPORAL_GAP
 
@@ -1476,6 +1491,11 @@ def main():
     SEQ_ANCHOR_SCALE = bool(rospy.get_param(
         "~seq_anchor_scale",
         SEQ_ANCHOR_SCALE
+    ))
+
+    SEQ_CROSS_TRACK_GAIN = float(rospy.get_param(
+        "~seq_cross_track_gain",
+        SEQ_CROSS_TRACK_GAIN
     ))
 
     MAX_LOOP_INS_DISTANCE = float(rospy.get_param(
@@ -1584,6 +1604,12 @@ def main():
         rospy.loginfo(
             "Scale anchoring ENABLED — step magnitude from INS, "
             "direction from ICP (fixes systematic ICP compression)"
+        )
+
+    if SEQ_CROSS_TRACK_GAIN != 1.0:
+        rospy.loginfo(
+            f"Cross-track damping ENABLED — ICP lateral correction gain="
+            f"{SEQ_CROSS_TRACK_GAIN:.2f} (0=INS lateral; fixes east drift)"
         )
 
     if registration_algorithm == "ndt":
@@ -1931,12 +1957,17 @@ def main():
                 # INS), no 2D pura. Evita la compresión/torsión de los giros
                 # (donde el AUV tiene pitch) que hacía crecer la deriva con la
                 # trayectoria. La traslación XY lleva la corrección del ICP.
+                #
+                # Opción A1 — SEQ_CROSS_TRACK_GAIN amortigua la componente lateral
+                # (cross-track) del ICP, que metía un sesgo sistemático hacia
+                # +East (se contrae a la izquierda, se sobrepasa a la derecha).
                 T = ins_rotation_icp_translation(
                     result.transformation,
                     T_init,
                     min_length_ratio=MIN_SEQ_ICP_LENGTH_RATIO,
                     max_length_ratio=MAX_SEQ_ICP_LENGTH_RATIO,
-                    anchor_scale=SEQ_ANCHOR_SCALE
+                    anchor_scale=SEQ_ANCHOR_SCALE,
+                    cross_track_gain=SEQ_CROSS_TRACK_GAIN
                 )
 
                 info = dynamic_information_matrix(

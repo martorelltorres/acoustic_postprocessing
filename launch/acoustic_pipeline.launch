@@ -45,6 +45,9 @@
          solo aporta dirección. Desactivado: sube la corrección media. Se usa el
          gate de longitud (Fix A) con la banda de arriba. -->
     <arg name="seq_anchor_scale"             default="false"/>
+    <!-- A1: ganancia de la corrección lateral (cross-track) del ICP. 0=la
+         componente lateral la pone la INS (sin sesgo +East), 1=ICP pleno. -->
+    <arg name="seq_cross_track_gain"         default="0.0"/>
     <arg name="ndt_resolution" default="1.0"/>
     <arg name="ndt_max_points" default="3000"/>
     <arg name="ndt_min_points_per_voxel" default="5"/>
@@ -95,6 +98,7 @@
         <param name="min_seq_icp_length_ratio"    value="$(arg min_seq_icp_length_ratio)" />
         <param name="max_seq_icp_length_ratio"    value="$(arg max_seq_icp_length_ratio)" />
         <param name="seq_anchor_scale"            value="$(arg seq_anchor_scale)" />
+        <param name="seq_cross_track_gain"        value="$(arg seq_cross_track_gain)" />
         <param name="ndt_resolution" value="$(arg ndt_resolution)" />
         <param name="ndt_max_points" value="$(arg ndt_max_points)" />
         <param name="ndt_min_points_per_voxel" value="$(arg ndt_min_points_per_voxel)" />
