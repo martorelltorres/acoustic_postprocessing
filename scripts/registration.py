@@ -85,9 +85,12 @@ def execute_global_registration(
             criteria=(
                 o3d.pipelines.registration.
                 RANSACConvergenceCriteria(
-                    4000000,        # antes: 100000
-                                    # más iteraciones compensan la baja
-                                    # discriminabilidad de FPFH en escenas planas
+                    100000,         # PERF: bajado de 4.000.000.
+                                    # En fondo plano FPFH no discrimina y RANSAC
+                                    # falla casi siempre (ver report_ransac.md),
+                                    # así que 4M iteraciones eran cómputo
+                                    # malgastado. 100k basta donde sí hay
+                                    # estructura y acelera mucho donde no.
                     0.999
                 )
             )

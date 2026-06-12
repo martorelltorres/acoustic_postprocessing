@@ -177,6 +177,56 @@ def create_loop_lines(
     return loop_lines
 
 
+# =============================================================================
+# RECENT CLOUDS LAYER  (Opción C / VIS-002)
+# =============================================================================
+
+def build_recent_clouds(
+        patches,
+        pose_graph,
+        window=15,
+        voxel=0.4):
+    """
+    Construye una única nube con los últimos `window` patches transformados por
+    su pose actual del grafo. Cada patch se tiñe con un gradiente temporal (de
+    azul=más antiguo a rojo=más reciente) para que se vea el orden y dónde
+    podría haber un desalineamiento. `voxel` submuestrea por rendimiento.
+    """
+
+    n = min(len(patches), len(pose_graph.nodes))
+    if n == 0:
+        return None
+
+    start = max(0, n - window)
+    span = max(n - start, 1)
+
+    merged = o3d.geometry.PointCloud()
+
+    for k, idx in enumerate(range(start, n)):
+
+        patch = patches[idx]
+        if patch.pcd is None:
+            continue
+
+        cloud = copy.deepcopy(patch.pcd)
+        cloud.transform(pose_graph.nodes[idx].pose)
+
+        # Gradiente temporal azul→rojo según antigüedad dentro de la ventana.
+        frac = k / span
+        color = [frac, 0.15, 1.0 - frac]
+        cloud.paint_uniform_color(color)
+
+        merged += cloud
+
+    if len(merged.points) == 0:
+        return None
+
+    if voxel is not None and voxel > 0:
+        merged = merged.voxel_down_sample(voxel)
+
+    return merged
+
+
 class PoseGraphMonitor:
 
     def __init__(
@@ -184,7 +234,10 @@ class PoseGraphMonitor:
             enabled=True,
             overview_zoom=0.18,
             min_zoom=0.03,
-            overview_margin=2.5):
+            overview_margin=2.5,
+            show_clouds=True,
+            cloud_window=15,
+            cloud_voxel=0.4):
 
         self.vis = o3d.visualization.Visualizer()
 
@@ -193,6 +246,16 @@ class PoseGraphMonitor:
         self.overview_zoom = overview_zoom
         self.min_zoom = min_zoom
         self.overview_margin = overview_margin
+
+        # --- Capa de nubes de puntos (Opción C / VIS-002) ---
+        # Muestra las nubes de los últimos `cloud_window` patches transformadas
+        # por sus poses actuales, para ver el mapa construyéndose y detectar
+        # incoherencias de alineamiento en vivo. `cloud_voxel` submuestrea para
+        # que el render no ahogue el bucle (None = sin submuestreo).
+        self.show_clouds = show_clouds
+        self.cloud_window = int(cloud_window)
+        self.cloud_voxel = cloud_voxel
+        self.cloud_geom = None
 
         if not enabled:
             return
@@ -226,7 +289,7 @@ class PoseGraphMonitor:
 
         self.ctr = self.vis.get_view_control()
 
-    def update(self, pose_graph):
+    def update(self, pose_graph, patches=None):
 
         if not self.active:
             return
@@ -247,6 +310,18 @@ class PoseGraphMonitor:
             pose_graph,
             color=[1, 0, 0]
         )
+
+        # Capa de nubes de los últimos N patches (si se aportan patches y está
+        # activada). Permite ver el mapa construyéndose y detectar
+        # desalineamientos en vivo.
+        recent_clouds = None
+        if self.show_clouds and patches is not None:
+            recent_clouds = build_recent_clouds(
+                patches,
+                pose_graph,
+                window=self.cloud_window,
+                voxel=self.cloud_voxel
+            )
 
         # =========================================================
         # NODE CLOUD
@@ -302,6 +377,13 @@ class PoseGraphMonitor:
 
             self.node_geom = node_cloud
 
+            if recent_clouds is not None:
+                self.vis.add_geometry(
+                    recent_clouds,
+                    reset_bounding_box=False
+                )
+                self.cloud_geom = recent_clouds
+
             self.initialized = True
 
         else:
@@ -327,6 +409,13 @@ class PoseGraphMonitor:
                     self.node_geom,
                     reset_bounding_box=False
                 )
+
+            if self.cloud_geom is not None:
+                self.vis.remove_geometry(
+                    self.cloud_geom,
+                    reset_bounding_box=False
+                )
+                self.cloud_geom = None
 
             # =====================================================
             # ADD UPDATED
@@ -356,6 +445,13 @@ class PoseGraphMonitor:
             )
 
             self.node_geom = node_cloud
+
+            if recent_clouds is not None:
+                self.vis.add_geometry(
+                    recent_clouds,
+                    reset_bounding_box=False
+                )
+                self.cloud_geom = recent_clouds
 
         # =========================================================
         # GLOBAL OVERVIEW CAMERA

@@ -2,6 +2,12 @@
 
 import numpy as np
 
+try:
+    from scipy.spatial import cKDTree
+    _HAS_KDTREE = True
+except ImportError:
+    _HAS_KDTREE = False
+
 
 # =============================================================================
 # SCAN CONTEXT DESCRIPTOR
@@ -154,13 +160,22 @@ class ScanContextManager:
         # Ring keys precalculadas para búsqueda rápida por columnas
         self._ring_keys = []
 
+        # Posiciones INS (norte, este) por patch, para el pre-filtro espacial.
+        # Opcional: si no se proporcionan, la búsqueda recae al O(N²) clásico.
+        self._ins_xy = []
+        self._kdtree = None
+
     # -------------------------------------------------------------------------
     # add_descriptor
     # -------------------------------------------------------------------------
 
-    def add_descriptor(self, pcd):
+    def add_descriptor(self, pcd, ins_xy=None):
         """
         Calcula el Scan Context de un Open3D PointCloud y lo añade a la BD.
+
+        ins_xy: (norte, este) opcional de la pose INS del patch. Si se aporta
+        para todos los patches, detect_loop_candidates pre-filtra por proximidad
+        espacial con un KD-tree (de O(N²) a O(N log N + N·vecinos)).
         """
 
         points = np.asarray(pcd.points)
@@ -177,6 +192,14 @@ class ScanContextManager:
         # Ring key: media por columna (sector) → vector 1D para preselección
         self._ring_keys.append(desc.mean(axis=0))
 
+        if ins_xy is not None:
+            self._ins_xy.append(
+                np.asarray(ins_xy, dtype=float)
+            )
+
+        # El KD-tree se invalida; se reconstruye perezosamente al buscar.
+        self._kdtree = None
+
     # -------------------------------------------------------------------------
     # detect_loop_candidates
     # -------------------------------------------------------------------------
@@ -185,10 +208,16 @@ class ScanContextManager:
             self,
             query_idx,
             top_k=5,
-            threshold=0.22):
+            threshold=0.22,
+            max_ins_distance=None):
         """
         Busca los top_k candidatos más similares al descriptor query_idx
         que estén separados al menos min_temporal_gap posiciones.
+
+        Si hay posiciones INS para todos los patches y se pasa max_ins_distance,
+        solo se evalúan los descriptores de patches espacialmente cercanos
+        (pre-filtro con KD-tree). Esto evita ~1456² comparaciones con FFT,
+        que es el principal cuello de botella del loop closure.
 
         Retorna lista de tuplas (cand_idx, distancia) ordenada por distancia
         ascendente, filtrada por el umbral threshold.
@@ -198,15 +227,41 @@ class ScanContextManager:
             return []
 
         query_desc = self.descriptors[query_idx]
+
+        # -- Conjunto de candidatos a evaluar --------------------------------
+        use_spatial = (
+            _HAS_KDTREE
+            and max_ins_distance is not None
+            and len(self._ins_xy) == len(self.descriptors)
+        )
+
+        if use_spatial:
+
+            if self._kdtree is None:
+                self._kdtree = cKDTree(np.vstack(self._ins_xy))
+
+            # Vecinos espaciales del query dentro de max_ins_distance.
+            cand_indices = self._kdtree.query_ball_point(
+                self._ins_xy[query_idx],
+                r=max_ins_distance
+            )
+
+        else:
+
+            cand_indices = range(len(self.descriptors))
+
         distances = []
 
-        for i, cand_desc in enumerate(self.descriptors):
+        for i in cand_indices:
 
             # Excluir vecinos temporales próximos
             if abs(i - query_idx) < self.min_temporal_gap:
                 continue
 
-            dist = scan_context_distance(query_desc, cand_desc)
+            dist = scan_context_distance(
+                query_desc,
+                self.descriptors[i]
+            )
 
             distances.append((i, dist))
 

@@ -109,52 +109,105 @@ def constrain_transform(
 def ins_rotation_icp_translation(
         T_icp,
         T_init,
-        max_translation=5):
+        max_translation=5,
+        min_length_ratio=None,
+        max_length_ratio=None,
+        anchor_scale=False):
     """
-    Construye una transformación 2D tomando la ROTACIÓN de la navegación INS
-    (``T_init``) y la TRASLACIÓN del resultado ICP (``T_icp``).
+    Construye una transformación SE(3) tomando la ROTACIÓN COMPLETA de la
+    navegación INS (``T_init``) y la TRASLACIÓN del resultado ICP (``T_icp``),
+    corregida en el plano de avance.
 
-    Motivo: en un fondo marino plano y sin estructura, la rotación estimada por
-    el ICP es ruido aleatorio (std ~19°/paso, media ≈0). Integrada sobre cientos
-    de aristas produce un random walk rotacional que desvía la trayectoria SLAM
-    decenas de grados respecto a la navegación. El DVL+IMU de la INS mide la
-    rotación con fiabilidad, así que se usa la rotación INS y se deja que el ICP
-    solo refine la traslación XY (que sí aporta valor cuando pasa los gates).
+    Motivo (rotación): en un fondo marino plano y sin estructura, la rotación
+    estimada por el ICP es ruido aleatorio (std ~19°/paso, media ≈0). Integrada
+    sobre cientos de aristas produce un random walk rotacional que desvía la
+    trayectoria. El DVL+IMU de la INS mide la rotación con fiabilidad.
 
-    Salida: SE(3) 2D con yaw de la INS, traslación XY del ICP (acotada),
-    y Z = roll = pitch = 0.
+    Opción A — arista SE(3) completa (no 2D):
+    La versión anterior reconstruía la arista como 2D pura (Z=0, roll=pitch=0,
+    yaw = arctan2(T_init[1,0], T_init[0,0])). Eso es correcto en tramos rectos y
+    planos, pero en los GIROS del lawnmower el AUV tiene pitch: la extracción de
+    yaw del frame local mezcla pitch+yaw y la proyección XY no conserva la
+    longitud del paso → cada giro comprime y rota ligeramente mal, y el error se
+    acumula (deriva que crece con la trayectoria, correlación error-distancia
+    0.84). Conservando la rotación 3D íntegra de T_init y la componente Z de la
+    traslación, la geometría del paso se preserva exactamente en los giros.
+
+    Traslación: se parte de la traslación 3D de T_init (paso INS fiable) y se le
+    aplica la corrección XY del ICP en el plano, con control de escala:
+
+    - ``anchor_scale=True``: la magnitud XY se fija a la del paso INS y el ICP
+      solo aporta dirección (corrige el sesgo de compresión del ICP).
+    - Gate de longitud (Fix A): si ``anchor_scale=False``, solo se reescala a la
+      INS cuando el ratio |T_icp_xy|/|T_init_xy| sale de la banda.
+
+    Salida: SE(3) (matriz 4x4) con la rotación 3D de la INS.
     """
 
-    yaw = np.arctan2(
-        T_init[1, 0],
-        T_init[0, 0]
-    )
+    icp_xy = np.array([
+        T_icp[0, 3],
+        T_icp[1, 3]
+    ], dtype=float)
+
+    ins_xy = np.array([
+        T_init[0, 3],
+        T_init[1, 3]
+    ], dtype=float)
+
+    ins_len = float(np.linalg.norm(ins_xy))
+    icp_len = float(np.linalg.norm(icp_xy))
+
+    if anchor_scale:
+
+        # Magnitud del paso real desde el INS, dirección del ICP.
+        # Se ancla a la norma 3D de T_init (se conserva bajo la transformada
+        # rígida) para recuperar la longitud real del paso.
+        ins_len_3d = float(np.linalg.norm(T_init[:3, 3]))
+
+        if ins_len_3d > 1e-6 and icp_len > 1e-6:
+            icp_xy = icp_xy * (ins_len_3d / icp_len)
+        elif ins_len > 1e-6:
+            # Sin dirección ICP fiable: usa la traslación INS XY directamente.
+            icp_xy = ins_xy.copy()
+
+    elif (
+        min_length_ratio is not None
+        and max_length_ratio is not None
+    ):
+
+        # Gate de longitud (Fix A).
+        if ins_len > 1e-6 and icp_len > 1e-6:
+
+            ratio = icp_len / ins_len
+
+            if ratio < min_length_ratio or ratio > max_length_ratio:
+
+                # Conserva la dirección del ICP, magnitud de la INS.
+                icp_xy = icp_xy * (ins_len / icp_len)
 
     tx = np.clip(
-        T_icp[0, 3],
+        icp_xy[0],
         -max_translation,
         max_translation
     )
 
     ty = np.clip(
-        T_icp[1, 3],
+        icp_xy[1],
         -max_translation,
         max_translation
     )
 
+    # Rotación 3D íntegra de la INS (Opción A): preserva roll/pitch/yaw reales,
+    # clave para no comprimir ni torcer los giros.
     T_new = np.eye(4)
+    T_new[:3, :3] = T_init[:3, :3]
 
-    c = np.cos(yaw)
-    s = np.sin(yaw)
-
-    T_new[0, 0] = c
-    T_new[0, 1] = -s
-    T_new[1, 0] = s
-    T_new[1, 1] = c
-
+    # Traslación: corrección XY del ICP en el plano, Z del paso INS. Mantener la
+    # Z de T_init conserva la longitud 3D del paso; la restauración vertical
+    # post-optimización ajusta la profundidad absoluta de cada nodo.
     T_new[0, 3] = tx
     T_new[1, 3] = ty
-    T_new[2, 3] = 0.0
+    T_new[2, 3] = T_init[2, 3]
 
     return T_new
 

@@ -11,6 +11,7 @@ import os
 import copy
 import json
 import csv
+import time
 
 import rospy
 import rosbag
@@ -64,6 +65,17 @@ ICP_DISTANCE = 2.0
 ICP_MAX_ITER = 60
 
 REGISTRATION_ALGORITHM = "icp"
+
+# Peso geométrico del Colored ICP (registration_algorithm="colored_icp").
+# 1.0 = solo geometría (≡ icp); valores menores dan más peso a la intensidad
+# acústica. 0.6 = punto de partida para fondo plano con estructura concentrada.
+COLORED_ICP_LAMBDA = 0.6
+
+# Modo "hybrid": umbral de textura geométrica para elegir geometría vs intensidad.
+# Fracción mínima de normales en pendiente (no verticales) para fiarse del ICP
+# geométrico; por debajo, el par se registra con Colored ICP (intensidad).
+# 0.08 = al menos 8% de relieve para usar geometría pura.
+HYBRID_MIN_TEXTURE = 0.08
 
 NDT_RESOLUTION = 1.0
 
@@ -131,6 +143,45 @@ MAX_SEQ_ICP_TRANSLATION_DEV = 0.5   # m
 MAX_SEQ_ICP_YAW_DEV         = 15.0  # degrees
 
 # -----------------------------------------------------------------------------
+# ICP TRANSLATION LENGTH-RATIO GATE  (sequential registration)
+# -----------------------------------------------------------------------------
+# With 80% patch overlap (PATCH_SIZE=100, PATCH_STRIDE=20) the ICP translation
+# is biased toward the centroid of the overlapping region, so accepted steps
+# are systematically ~8% SHORTER than the true INS motion. Integrated over
+# ~1100 edges this compresses the SLAM path by ~7% and the position lags
+# progressively behind the INS → XY error that grows with distance.
+#
+# The INS step length (DVL+IMU baseline) is reliable. We therefore compare the
+# ICP translation magnitude with the INS-expected magnitude (|T_init[:2,3]|):
+#
+#   ratio = |T_icp_xy| / |T_init_xy|
+#
+# If the ratio falls outside [MIN, MAX], the ICP has mis-scaled the step
+# (overlap-slide or spurious stretch) and we keep the ICP DIRECTION but rescale
+# the translation magnitude to the INS length. The ICP rotation is already
+# replaced by the INS rotation (Fix 1), so this confines the ICP contribution
+# to a reliable, scale-correct in-plane refinement.
+#
+# Band [0.85, 1.15] on the derelictes mission cuts the path deficit 7.1% → 3.3%.
+# -----------------------------------------------------------------------------
+
+MIN_SEQ_ICP_LENGTH_RATIO = 0.85
+MAX_SEQ_ICP_LENGTH_RATIO = 1.15
+
+# -----------------------------------------------------------------------------
+# ANCLAJE DE ESCALA DE LA TRASLACIÓN  (sequential registration)
+# -----------------------------------------------------------------------------
+# Con SEQ_ANCHOR_SCALE=True la magnitud de cada paso se fija a la del prior INS y
+# el ICP solo aporta la dirección. Aplanaba los picos del ICP (máx 15→9.7m) pero
+# introducía un sesgo sistemático que SUBÍA la corrección media (4.14→4.85m) y
+# linealizaba la deriva (correlación error-distancia 0.59→0.69). Desactivado por
+# defecto: se usa el gate de longitud (Fix A), banda [0.85,1.15], que era el
+# estado que daba el mejor baseline (media 4.14m).
+# -----------------------------------------------------------------------------
+
+SEQ_ANCHOR_SCALE = False
+
+# -----------------------------------------------------------------------------
 # HIGH-CONFIDENCE FALLBACK
 # -----------------------------------------------------------------------------
 # If fitness is extremely high and correspondences are massive,
@@ -162,6 +213,15 @@ MAX_LOOP_Z_TRANSLATION = 0.5
 MAX_LOOP_XY_TRANSLATION = 8.0
 
 MAX_LOOP_YAW_DEG = 20.0
+
+# -----------------------------------------------------------------------------
+# MINIMUM TEMPORAL GAP  (loop closure)
+# -----------------------------------------------------------------------------
+# Mínima separación temporal (en índices de patch) entre dos patches para que
+# sean candidatos a cierre de bucle. Valor del baseline (4.14m).
+# -----------------------------------------------------------------------------
+
+MIN_LOOP_TEMPORAL_GAP = 25
 
 # -----------------------------------------------------------------------------
 # INS PROXIMITY GATE
@@ -443,6 +503,12 @@ class NavigationInterpolator:
 
 class PatchBuilder:
 
+    def __init__(self):
+        # Perfil AVG de corrección de banding por ángulo de incidencia.
+        # Se rellena en build() vía _build_avg_profile(); None = sin corrección.
+        self._avg_centers = None
+        self._avg_gain = None
+
     def _select_scan_time_source(
             self,
             scans,
@@ -545,6 +611,95 @@ class PatchBuilder:
 
         return timestamp
 
+    def _build_avg_profile(self, scans):
+        """
+        Calcula el perfil de ganancia por ángulo de incidencia (AVG, Angle
+        Varying Gain) a partir de TODOS los scans.
+
+        La intensidad del MBES está dominada por el ángulo de incidencia: forma
+        de campana simétrica, pico ~45 cerca del nadir y caída a ~10 en los
+        bordes (±50°). Ese banding está ligado a la pose del vehículo, no al
+        fondo, y arruina el Colored ICP (alinea las bandas en vez del fondo).
+
+        El perfil es la MEDIANA de intensidad por bin angular (robusta a la
+        estructura del fondo y a outliers). Luego, en cada punto:
+
+            I_corregida = I / gain(angulo_incidencia)
+
+        deja la intensidad ≈1 de media a cualquier ángulo, conservando solo la
+        textura real del fondo (la firma de sedimento/roca). Reduce el banding
+        ~99% y preserva la señal del fondo.
+
+        Devuelve (centers, gain) o (None, None) si no hay intensidad utilizable.
+        """
+
+        # Bins de ángulo ABSOLUTO (0..60°) para que el perfil coincida con el
+        # `angles = arctan2(r_horizontal, depth)` (siempre ≥0) usado en build().
+        # El banding es simétrico respecto al nadir, así que |ángulo| es la
+        # variable correcta y duplica las muestras por bin.
+        bins = np.arange(0.0, 61.0, 2.0)
+        centers = (bins[:-1] + bins[1:]) / 2.0
+        per_bin = [[] for _ in range(len(centers))]
+
+        sampled = 0
+        for entry in scans:
+
+            scan = entry["msg"]
+
+            pc = ros_numpy.point_cloud2.pointcloud2_to_array(scan)
+
+            if 'intensity' not in pc.dtype.names:
+                return None, None
+
+            fin = (
+                np.isfinite(pc['x']) &
+                np.isfinite(pc['z']) &
+                np.isfinite(pc['intensity'])
+            )
+            pc = pc[fin]
+            if len(pc) < 10:
+                continue
+
+            x = np.asarray(pc['x'], dtype=float)
+            z = np.asarray(pc['z'], dtype=float)
+            inten = np.asarray(pc['intensity'], dtype=float)
+
+            # Ángulo de incidencia ABSOLUTO desde el nadir (x = across-track,
+            # z = profundidad). |ángulo| porque el banding es simétrico.
+            ang = np.abs(np.degrees(np.arctan2(x, np.abs(z))))
+
+            idx = np.clip(
+                np.digitize(ang, bins) - 1,
+                0,
+                len(centers) - 1
+            )
+
+            for b, iv in zip(idx, inten):
+                if len(per_bin[b]) < 4000:      # tope por bin
+                    per_bin[b].append(iv)
+
+            sampled += 1
+
+        gain = np.full(len(centers), np.nan)
+        for i in range(len(centers)):
+            if len(per_bin[i]) >= 50:
+                gain[i] = np.median(per_bin[i])
+
+        valid = np.isfinite(gain)
+        if valid.sum() < 3:
+            return None, None
+
+        centers_v = centers[valid]
+        gain_v = np.maximum(gain[valid], 1e-3)
+
+        rospy.loginfo(
+            f"AVG intensity profile built from {sampled} scans: "
+            f"gain {gain_v.min():.1f}–{gain_v.max():.1f} "
+            f"(banding swing {gain_v.max()-gain_v.min():.1f})"
+        )
+
+        return centers_v, gain_v
+
     def build(
             self,
             bag,
@@ -579,6 +734,19 @@ class PatchBuilder:
             nav
         )
 
+        # Perfil AVG de corrección de banding por ángulo de incidencia.
+        # Se calcula una vez sobre todos los scans y se aplica a la intensidad
+        # de cada punto durante la construcción del patch.
+        rospy.loginfo(
+            "Building AVG intensity profile (incidence-angle correction)..."
+        )
+        self._avg_centers, self._avg_gain = self._build_avg_profile(scans)
+        if self._avg_centers is None:
+            rospy.logwarn(
+                "No usable intensity for AVG correction; "
+                "intensity used uncorrected (colored_icp may band)."
+            )
+
         patches = []
 
         rospy.loginfo(
@@ -594,6 +762,7 @@ class PatchBuilder:
                 desc="Patch generation"):
 
             all_points = []
+            all_intensity = []
 
             center_scan_idx = start + PATCH_SIZE // 2
             center_entry = scans[center_scan_idx]
@@ -644,6 +813,12 @@ class PatchBuilder:
                     np.isfinite(pc['z'])
                 )
 
+                # La intensidad acústica (backscatter) se arrastra en paralelo
+                # a xyz para usarla en Colored ICP. Si el sensor no la publica,
+                # se rellena con ceros (el pcd queda sin textura útil).
+                if 'intensity' in pc.dtype.names:
+                    finite_mask = finite_mask & np.isfinite(pc['intensity'])
+
                 pc = pc[finite_mask]
 
                 if len(pc) < 10:
@@ -654,6 +829,11 @@ class PatchBuilder:
                     -pc['y'],
                     -pc['z']
                 ))
+
+                if 'intensity' in pc.dtype.names:
+                    intensity = np.asarray(pc['intensity'], dtype=float)
+                else:
+                    intensity = np.zeros(len(xyz), dtype=float)
 
                 r_horizontal = np.sqrt(
                     xyz[:, 0]**2 +
@@ -671,9 +851,22 @@ class PatchBuilder:
                     )
                 )
 
-                xyz = xyz[
-                    angles < ANGLE_CUTOFF_DEG
-                ]
+                # Corrección AVG: divide la intensidad por la ganancia esperada
+                # a su ángulo de incidencia, eliminando el banding del haz y
+                # dejando solo la textura real del fondo. El perfil y `angles`
+                # usan ambos el ángulo absoluto desde el nadir.
+                if self._avg_centers is not None:
+                    gain = np.interp(
+                        angles,
+                        self._avg_centers,
+                        self._avg_gain
+                    )
+                    intensity = intensity / np.maximum(gain, 1e-3)
+
+                angle_keep = angles < ANGLE_CUTOFF_DEG
+
+                xyz = xyz[angle_keep]
+                intensity = intensity[angle_keep]
 
                 if len(xyz) < 10:
                     continue
@@ -714,20 +907,23 @@ class PatchBuilder:
 
                 finite_xyz = np.isfinite(xyz).all(axis=1)
                 xyz = xyz[finite_xyz]
+                intensity = intensity[finite_xyz]
 
                 if len(xyz) < 10:
                     continue
 
                 all_points.append(xyz)
+                all_intensity.append(intensity)
 
             if len(all_points) == 0:
                 continue
 
             pts = np.vstack(all_points)
+            inten = np.concatenate(all_intensity)
 
-            pts = pts[
-                np.isfinite(pts).all(axis=1)
-            ]
+            keep_finite = np.isfinite(pts).all(axis=1)
+            pts = pts[keep_finite]
+            inten = inten[keep_finite]
 
             if len(pts) < MIN_PATCH_POINTS:
                 continue
@@ -754,6 +950,28 @@ class PatchBuilder:
 
             pcd.points = (
                 o3d.utility.Vector3dVector(pts)
+            )
+
+            # Intensidad acústica → color gris normalizado [0,1].
+            # Normalización robusta por percentiles (2-98) para usar bien el
+            # rango y no dejar que outliers de backscatter aplasten la señal.
+            # El voxel_down_sample promedia los colores por voxel, así que la
+            # intensidad se conserva coherentemente tras el downsample.
+            if np.ptp(inten) > 1e-6:
+                lo = np.percentile(inten, 2)
+                hi = np.percentile(inten, 98)
+                inten_n = np.clip(
+                    (inten - lo) / max(hi - lo, 1e-6),
+                    0.0,
+                    1.0
+                )
+            else:
+                inten_n = np.zeros(len(inten), dtype=float)
+
+            pcd.colors = (
+                o3d.utility.Vector3dVector(
+                    np.tile(inten_n[:, None], (1, 3))
+                )
             )
 
             try:
@@ -818,7 +1036,9 @@ def execute_local_registration(
         max_iter,
         ndt_resolution,
         ndt_max_points,
-        ndt_min_points_per_voxel):
+        ndt_min_points_per_voxel,
+        colored_icp_lambda=0.6,
+        hybrid_min_texture=0.08):
 
     algorithm = algorithm.lower()
 
@@ -830,6 +1050,30 @@ def execute_local_registration(
             T_init,
             icp_distance=icp_distance,
             max_iter=max_iter
+        )
+
+    if algorithm == "colored_icp":
+
+        return robust_colored_icp(
+            source,
+            target,
+            T_init,
+            icp_distance=icp_distance,
+            max_iter=max_iter,
+            lambda_geometric=colored_icp_lambda
+        )
+
+    if algorithm == "hybrid":
+
+        # Adaptativo: geometría donde hay relieve, intensidad donde no lo hay.
+        return robust_hybrid_icp(
+            source,
+            target,
+            T_init,
+            icp_distance=icp_distance,
+            max_iter=max_iter,
+            lambda_geometric=colored_icp_lambda,
+            min_geometric_texture=hybrid_min_texture
         )
 
     if algorithm == "ndt":
@@ -847,7 +1091,7 @@ def execute_local_registration(
 
     raise ValueError(
         f"Unsupported registration_algorithm '{algorithm}'. "
-        "Use 'icp' or 'ndt'."
+        "Use 'icp', 'colored_icp', 'hybrid' or 'ndt'."
     )
 
 
@@ -1156,12 +1400,23 @@ def main():
         registration_algorithm
     ).lower()
 
-    if registration_algorithm not in ("icp", "ndt"):
+    if registration_algorithm not in ("icp", "colored_icp", "hybrid", "ndt"):
 
         raise ValueError(
             f"Unsupported registration_algorithm "
-            f"'{registration_algorithm}'. Use 'icp' or 'ndt'."
+            f"'{registration_algorithm}'. "
+            f"Use 'icp', 'colored_icp', 'hybrid' or 'ndt'."
         )
+
+    colored_icp_lambda = float(rospy.get_param(
+        "~colored_icp_lambda",
+        COLORED_ICP_LAMBDA
+    ))
+
+    hybrid_min_texture = float(rospy.get_param(
+        "~hybrid_min_texture",
+        HYBRID_MIN_TEXTURE
+    ))
 
     ndt_resolution = rospy.get_param(
         "~ndt_resolution",
@@ -1193,7 +1448,10 @@ def main():
     )
 
     global MAX_SEQ_ICP_TRANSLATION_DEV, MAX_SEQ_ICP_YAW_DEV
+    global MIN_SEQ_ICP_LENGTH_RATIO, MAX_SEQ_ICP_LENGTH_RATIO
+    global SEQ_ANCHOR_SCALE
     global MAX_LOOP_INS_DISTANCE, MIN_LOOP_ICP_INS_RATIO, MIN_INS_DIST_FOR_RATIO_CHECK
+    global MIN_LOOP_TEMPORAL_GAP
 
     MAX_SEQ_ICP_TRANSLATION_DEV = float(rospy.get_param(
         "~max_seq_icp_translation_dev",
@@ -1203,6 +1461,21 @@ def main():
     MAX_SEQ_ICP_YAW_DEV = float(rospy.get_param(
         "~max_seq_icp_yaw_dev",
         MAX_SEQ_ICP_YAW_DEV
+    ))
+
+    MIN_SEQ_ICP_LENGTH_RATIO = float(rospy.get_param(
+        "~min_seq_icp_length_ratio",
+        MIN_SEQ_ICP_LENGTH_RATIO
+    ))
+
+    MAX_SEQ_ICP_LENGTH_RATIO = float(rospy.get_param(
+        "~max_seq_icp_length_ratio",
+        MAX_SEQ_ICP_LENGTH_RATIO
+    ))
+
+    SEQ_ANCHOR_SCALE = bool(rospy.get_param(
+        "~seq_anchor_scale",
+        SEQ_ANCHOR_SCALE
     ))
 
     MAX_LOOP_INS_DISTANCE = float(rospy.get_param(
@@ -1218,6 +1491,11 @@ def main():
     MIN_INS_DIST_FOR_RATIO_CHECK = float(rospy.get_param(
         "~min_ins_dist_for_ratio_check",
         MIN_INS_DIST_FOR_RATIO_CHECK
+    ))
+
+    MIN_LOOP_TEMPORAL_GAP = int(rospy.get_param(
+        "~min_loop_temporal_gap",
+        MIN_LOOP_TEMPORAL_GAP
     ))
 
     enable_monitor = rospy.get_param(
@@ -1239,6 +1517,21 @@ def main():
         "~monitor_margin",
         2.5
     )
+
+    monitor_show_clouds = rospy.get_param(
+        "~monitor_show_clouds",
+        True
+    )
+
+    monitor_cloud_window = int(rospy.get_param(
+        "~monitor_cloud_window",
+        15
+    ))
+
+    monitor_cloud_voxel = float(rospy.get_param(
+        "~monitor_cloud_voxel",
+        0.4
+    ))
 
     rospy.loginfo(
         f"Loop closure enabled: {enable_loop_closure}"
@@ -1266,11 +1559,32 @@ def main():
         f"Registration algorithm: {registration_algorithm}"
     )
 
+    if registration_algorithm == "colored_icp":
+        rospy.loginfo(
+            f"Colored ICP (acoustic intensity) — "
+            f"lambda_geometric={colored_icp_lambda:.2f}"
+        )
+
+    if registration_algorithm == "hybrid":
+        rospy.loginfo(
+            f"Hybrid registration — geometry where relief exists, "
+            f"intensity where flat (min_texture={hybrid_min_texture:.2f}, "
+            f"lambda_geometric={colored_icp_lambda:.2f})"
+        )
+
     rospy.loginfo(
         f"ICP–nav consistency gates — "
         f"max_translation_dev={MAX_SEQ_ICP_TRANSLATION_DEV:.2f}m  "
-        f"max_yaw_dev={MAX_SEQ_ICP_YAW_DEV:.1f}deg"
+        f"max_yaw_dev={MAX_SEQ_ICP_YAW_DEV:.1f}deg  "
+        f"length_ratio_band=[{MIN_SEQ_ICP_LENGTH_RATIO:.2f}, "
+        f"{MAX_SEQ_ICP_LENGTH_RATIO:.2f}]"
     )
+
+    if SEQ_ANCHOR_SCALE:
+        rospy.loginfo(
+            "Scale anchoring ENABLED — step magnitude from INS, "
+            "direction from ICP (fixes systematic ICP compression)"
+        )
 
     if registration_algorithm == "ndt":
 
@@ -1307,6 +1621,10 @@ def main():
         nav_topic
     )
 
+    # Cronometraje por etapa (PERF). Permite ver dónde se va el tiempo.
+    stage_times = {}
+    _t_stage = time.time()
+
     builder = PatchBuilder()
 
     patches = builder.build(
@@ -1318,6 +1636,9 @@ def main():
     )
 
     bag.close()
+
+    stage_times["patch_building"] = time.time() - _t_stage
+    _t_stage = time.time()
 
     rospy.loginfo(
         f"Generated {len(patches)} patches"
@@ -1337,15 +1658,26 @@ def main():
     if enable_loop_closure:
 
         scan_context_manager = \
-            ScanContextManager()
+            ScanContextManager(
+                min_temporal_gap=MIN_LOOP_TEMPORAL_GAP
+            )
 
         for patch in tqdm(
                 patches,
                 desc="Scan Context"):
 
+            # Se aporta la posición INS (norte, este) del patch para habilitar
+            # el pre-filtro espacial por KD-tree en detect_loop_candidates.
             scan_context_manager.add_descriptor(
-                patch.pcd
+                patch.pcd,
+                ins_xy=(
+                    patch.pose['north'],
+                    patch.pose['east']
+                )
             )
+
+    stage_times["scan_context"] = time.time() - _t_stage
+    _t_stage = time.time()
 
     pose_graph = (
         o3d.pipelines.registration.PoseGraph()
@@ -1367,7 +1699,10 @@ def main():
         enabled=enable_monitor,
         overview_zoom=monitor_zoom,
         min_zoom=monitor_min_zoom,
-        overview_margin=monitor_margin
+        overview_margin=monitor_margin,
+        show_clouds=monitor_show_clouds,
+        cloud_window=monitor_cloud_window,
+        cloud_voxel=monitor_cloud_voxel
     )
 
     # =========================================================================
@@ -1427,7 +1762,9 @@ def main():
             ICP_MAX_ITER,
             ndt_resolution,
             ndt_max_points,
-            ndt_min_points_per_voxel
+            ndt_min_points_per_voxel,
+            colored_icp_lambda=colored_icp_lambda,
+            hybrid_min_texture=hybrid_min_texture
         )
 
         temporal_distance = (
@@ -1588,12 +1925,18 @@ def main():
                 # En fondo plano la rotación del ICP es ruido aleatorio
                 # (std ~19°/paso) que integra en un random walk y desvía la
                 # trayectoria decenas de grados. La rotación de la INS (DVL+IMU)
-                # es fiable, así que la arista usa la rotación de T_init y deja
-                # que el ICP solo refine la traslación XY (ya validada por los
-                # gates de traslación y dirección).
+                # es fiable, así que la arista usa la rotación de T_init.
+                #
+                # Opción A — la arista es SE(3) completa (rotación 3D + Z de la
+                # INS), no 2D pura. Evita la compresión/torsión de los giros
+                # (donde el AUV tiene pitch) que hacía crecer la deriva con la
+                # trayectoria. La traslación XY lleva la corrección del ICP.
                 T = ins_rotation_icp_translation(
                     result.transformation,
-                    T_init
+                    T_init,
+                    min_length_ratio=MIN_SEQ_ICP_LENGTH_RATIO,
+                    max_length_ratio=MAX_SEQ_ICP_LENGTH_RATIO,
+                    anchor_scale=SEQ_ANCHOR_SCALE
                 )
 
                 info = dynamic_information_matrix(
@@ -1688,7 +2031,8 @@ def main():
             )
 
             monitor.update(
-                pose_graph
+                pose_graph,
+                patches=patches
             )
 
     rospy.loginfo(
@@ -1749,6 +2093,9 @@ def main():
         FINAL_DOWNSAMPLE
     )
 
+    stage_times["sequential_and_raw_map"] = time.time() - _t_stage
+    _t_stage = time.time()
+
     # =========================================================================
     # LOOP CLOSURE
     # =========================================================================
@@ -1776,7 +2123,13 @@ def main():
                     MAX_LOOP_CANDIDATES,
 
                     threshold=
-                    SCAN_CONTEXT_THRESHOLD
+                    SCAN_CONTEXT_THRESHOLD,
+
+                    # Pre-filtro espacial: solo se evalúan descriptores de
+                    # patches dentro del gate de proximidad INS. Como el gate
+                    # rechazaba ~99% de candidatos después, ahora ni se calculan
+                    # sus FFTs → loop closure de O(N²) a casi lineal.
+                    max_ins_distance=MAX_LOOP_INS_DISTANCE
                 )
             )
 
@@ -1820,6 +2173,7 @@ def main():
                         "correspondences": 0,
                         "accepted": False,
                         "failure_reason": "ins_proximity_gate",
+                        "loop_seed": None,
                     })
 
                     continue
@@ -1833,6 +2187,10 @@ def main():
                     VOXEL_SIZE
                 )
 
+                # RANSAC-only (baseline): si RANSAC falla se descarta el
+                # candidato. Sembrar el ICP con el prior INS cuando RANSAC falla
+                # (Fix B) empeoró el resultado — los loops aceptados eran patches
+                # casi consecutivos que deformaban el grafo. Ver report.md.
                 if ransac_result is None:
 
                     rejected_loops += 1
@@ -1848,11 +2206,13 @@ def main():
                         "correspondences": 0,
                         "accepted": False,
                         "failure_reason": "ransac_failed",
+                        "loop_seed": None,
                     })
 
                     continue
 
                 T_init = ransac_result.transformation
+                loop_seed = "ransac"
 
                 result = execute_local_registration(
                     source,
@@ -1863,7 +2223,9 @@ def main():
                     ICP_MAX_ITER,
                     ndt_resolution,
                     ndt_max_points,
-                    ndt_min_points_per_voxel
+                    ndt_min_points_per_voxel,
+                    colored_icp_lambda=colored_icp_lambda,
+                    hybrid_min_texture=hybrid_min_texture
                 )
 
                 if result is None:
@@ -1881,6 +2243,7 @@ def main():
                         "correspondences": 0,
                         "accepted": False,
                         "failure_reason": "icp_failed",
+                        "loop_seed": loop_seed,
                     })
 
                     continue
@@ -2007,7 +2370,7 @@ def main():
                         )
                     )
 
-                    monitor.update(pose_graph)
+                    monitor.update(pose_graph, patches=patches)
 
                 else:
 
@@ -2030,7 +2393,11 @@ def main():
                     ),
                     "accepted": bool(valid_loop),
                     "failure_reason": loop_failure_reason,
+                    "loop_seed": loop_seed,
                 })
+
+    stage_times["loop_closure"] = time.time() - _t_stage
+    _t_stage = time.time()
 
     # =========================================================================
     # GLOBAL OPTIMIZATION
@@ -2070,6 +2437,8 @@ def main():
     rospy.loginfo(
         "Pose graph optimization finished"
     )
+
+    stage_times["global_optimization"] = time.time() - _t_stage
 
     # =========================================================================
     # VERTICAL POSE RESTORATION (Z + roll + pitch)
@@ -2119,7 +2488,8 @@ def main():
     )
 
     monitor.update(
-        pose_graph
+        pose_graph,
+        patches=patches
     )
 
     # =========================================================================
@@ -2427,6 +2797,7 @@ def main():
             "raw_yaw_deg",
             "accepted",
             "failure_reason",
+            "loop_seed",
         ])
 
         for m in metrics["loops"]:
@@ -2446,6 +2817,7 @@ def main():
                 m.get("raw_yaw_deg", ""),
                 m["accepted"],
                 m.get("failure_reason", ""),
+                m.get("loop_seed", ""),
             ])
 
     # =========================================================================
@@ -2458,6 +2830,30 @@ def main():
         slam_trajectory,
         metrics_dir
     )
+
+    # =========================================================================
+    # STAGE TIMING REPORT (PERF)
+    # =========================================================================
+    total = sum(stage_times.values())
+    rospy.loginfo(
+        "================================================"
+    )
+    rospy.loginfo("STAGE TIMING (PERF):")
+    for name, secs in stage_times.items():
+        pct = 100.0 * secs / max(total, 1e-6)
+        rospy.loginfo(f"  {name:24s}: {secs:8.1f} s  ({pct:4.1f}%)")
+    rospy.loginfo(f"  {'TOTAL (timed stages)':24s}: {total:8.1f} s")
+
+    # Persistir tiempos junto a las métricas para comparar runs.
+    try:
+        with open(os.path.join(metrics_dir, "stage_times.json"), "w") as f:
+            json.dump(
+                {**stage_times, "total_s": total},
+                f,
+                indent=4
+            )
+    except Exception as exc:
+        rospy.logwarn(f"Could not save stage_times.json: {exc}")
 
     rospy.loginfo(
         "================================================"
