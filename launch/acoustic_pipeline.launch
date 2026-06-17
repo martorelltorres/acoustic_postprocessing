@@ -10,9 +10,9 @@
    
     
     <!-- MINEX DERELICTES -->
-    <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260507_sparus2_uib_portopi_shipwrecks_and_harbour_entrance/bags/sparus2_multibeam_2026-05-07-06-42-24_0.bag"/> 
+    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260507_sparus2_uib_portopi_shipwrecks_and_harbour_entrance/bags/sparus2_multibeam_2026-05-07-06-42-24_0.bag"/>  -->
     <!-- MINEX ESTRENC -->
-    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260504_sparus2_uib_orat_spanish_minex_portopi/bags/sparus2_multibeam_2026-05-04-13-59-52_0.bag"/>  -->
+    <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260504_sparus2_uib_orat_spanish_minex_portopi/bags/sparus2_multibeam_2026-05-04-13-59-52_0.bag"/> 
     <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260507_sparus2_uib_portopi_shipwrecks_and_harbour_entrance/bags/sparus2_multibeam_2026-05-07-06-42-24_0.bag"/> -->
     <!-- <arg name="sss_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260507_sparus2_uib_portopi_shipwrecks_and_harbour_entrance/bags/sparus2_sidescan_2026-05-07-07-11-18_0.bag"/>  -->
 
