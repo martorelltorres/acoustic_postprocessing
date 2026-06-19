@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Author: Antoni Martorell
-Affiliation: Systems, Robotics and Vision Group (SRV),
-             University of the Balearic Islands (UIB)
-Contact: antoni.martorell@uib.es
-License: This code is provided for research and academic purposes.
+Texture the MB mesh with SSS intensity: geometry from multibeam, color from
+the sidescan mosaic. Both share the UTM frame. Output: mb_textured_sss.ply.
+
+Author: Antoni Martorell (SRV, UIB)
 """
 
 import rospy
 import os
+import time
 import open3d as o3d
 import rasterio
 import numpy as np
 from std_msgs.msg import Bool
 from matplotlib import cm
 
-# Global flags to track completion
+# Pipeline completion flags
 mb_finished = False
 sss_finished = False
 
@@ -23,20 +23,17 @@ def mb_callback(msg):
     global mb_finished
     if msg.data:
         mb_finished = True
-        rospy.loginfo("✔ Multibeam signal received.")
+        rospy.loginfo("Multibeam signal received.")
 
 def sss_callback(msg):
     global sss_finished
     if msg.data:
         sss_finished = True
-        rospy.loginfo("✔ Sidescan signal received.")
+        rospy.loginfo("Sidescan signal received.")
 
 def main():
     rospy.init_node('fusion_node', anonymous=True)
 
-    # -----------------------------
-    # CONFIGURATION
-    # -----------------------------
     mesh_file  = rospy.get_param('~mesh_file', '')
     sss_tif    = rospy.get_param('~sss_tif', '')
     output_dir = rospy.get_param('~output_dir', '.')
@@ -49,27 +46,31 @@ def main():
     COLORMAP = cm.gray
     NODATA_VALUE = 0
 
-    # -----------------------------
-    # ASYNCHRONOUS WAITING (THE FIX)
-    # -----------------------------
-    # Subscribe to both topics right away
+    # Max seconds to wait for the upstream producers before falling back to
+    # whatever already exists on disk (0 disables the wait entirely).
+    wait_timeout = rospy.get_param('~wait_timeout', 600.0)
+
+    # Wait for both producers (timeout -> fall back to files on disk).
+    # Uses wall-clock time so it works even without /clock (use_sim_time).
     rospy.Subscriber('/pipeline/mb_done', Bool, mb_callback)
     rospy.Subscriber('/pipeline/sss_done', Bool, sss_callback)
 
-    rospy.loginfo("Waiting for BOTH processes to finish...")
-    
-    rate = rospy.Rate(2) # Check 2 times per second
+    rospy.loginfo("Waiting for BOTH processes to finish (timeout %.0fs)..." % wait_timeout)
+
+    t_start = time.time()
     while not (mb_finished and sss_finished):
         if rospy.is_shutdown():
             rospy.logwarn("Node interrupted while waiting.")
             return
-        rate.sleep()
+        if wait_timeout > 0 and (time.time() - t_start) > wait_timeout:
+            rospy.logwarn("Timeout waiting for upstream signals. "
+                          "Using existing files on disk if available.")
+            break
+        time.sleep(0.5)
 
-    rospy.loginfo("Both processes have finished! Proceeding to read files...")
+    rospy.loginfo("Proceeding to read files...")
 
-    # -----------------------------
-    # 1. LOAD MB MESH
-    # -----------------------------
+    # Load MB mesh
     rospy.loginfo(f"Loading MB mesh from: {mesh_file}")
     if not os.path.isfile(mesh_file):
         rospy.logerr(f"CRITICAL: Signal received, but the file {mesh_file} was not found.")
@@ -84,9 +85,7 @@ def main():
         rospy.logerr("ERROR: The loaded mesh has 0 vertices.")
         return
 
-    # -----------------------------
-    # 2. LOAD SSS MOSAIC
-    # -----------------------------
+    # Load SSS mosaic
     rospy.loginfo(f"Loading SSS mosaic from: {sss_tif}")
     if not os.path.isfile(sss_tif):
         rospy.logerr(f"CRITICAL: Signal received, but the file {sss_tif} was not found.")
@@ -98,9 +97,7 @@ def main():
             transform = src.transform
             nodata = src.nodata
 
-            # -----------------------------
-            # 3. SSS → VERTICES PROJECTION
-            # -----------------------------
+            # Sample SSS intensity at each vertex (x, y) UTM
             rospy.loginfo("Projecting SSS intensity onto the mesh...")
             intensity = np.zeros(len(vertices), dtype=np.float32)
 
@@ -119,9 +116,7 @@ def main():
         rospy.logerr(f"Failed to open SSS file: {e}")
         return
 
-    # -----------------------------
-    # 4. NORMALIZE + COLOR MAP
-    # -----------------------------
+    # Normalize and apply colormap to vertices
     rospy.loginfo("Normalizing intensity and applying colormap...")
     valid = intensity > NODATA_VALUE
     rospy.loginfo(f"Vertices with valid intensity: {np.sum(valid)} / {len(valid)}")
@@ -135,12 +130,10 @@ def main():
     colors = COLORMAP(int_norm)[:, :3]
     mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
 
-    # -----------------------------
-    # 5. SAVE RESULT
-    # -----------------------------
+    # Save result
     rospy.loginfo(f"Saving textured mesh: {output_mesh}")
     o3d.io.write_triangle_mesh(output_mesh, mesh)
-    rospy.loginfo("✅ Projection successfully completed!")
+    rospy.loginfo("Projection completed.")
 
 if __name__ == "__main__":
     main()

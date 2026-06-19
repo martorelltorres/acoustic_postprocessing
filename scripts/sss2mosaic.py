@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+Sidescan -> top-down georeferenced mosaic (UTM GeoTIFF).
+Slant-range corrected, accumulated on a north/east grid.
+
+Author: Antoni Martorell (SRV, UIB)
+"""
 
 import rospy
 import rosbag
@@ -14,17 +20,17 @@ import tf.transformations as tr
 from std_msgs.msg import Bool
 import time
 
-# ================= CONFIGURATION =================
-SONAR_RANGE = 30.0
-MOSAIC_RES = 0.07
-BLIND_ZONE = 0.2
+SONAR_RANGE = 30.0   # m, full per-channel range
+MOSAIC_RES = 0.07    # m/pixel
+BLIND_ZONE = 0.2     # m, nadir gap to skip
 
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM = "EPSG:32631"
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
 
-# ================= IMAGE ENHANCEMENT =================
+
 def enhance_data(img_input):
+    # Normalize (2-98 pct), despeckle, CLAHE, sharpen -> 8-bit.
 
     if img_input is None or img_input.size == 0:
         return np.zeros_like(img_input, dtype=np.uint8)
@@ -50,8 +56,9 @@ def enhance_data(img_input):
 
     return cv2.filter2D(img, -1, kernel)
 
-# ================= TF =================
+
 def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
+    # First parent->child transform found in /tf_static or /tf (4x4).
 
     bag = rosbag.Bag(bag_file)
 
@@ -72,16 +79,18 @@ def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
     bag.close()
     return np.identity(4)
 
-# ================= NAVIGATION =================
-def get_nav_origin(bag, nav_topic):
 
+def get_nav_origin(bag, nav_topic):
+    # Geographic origin (lat, lon) of the local navigation frame.
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
         if hasattr(msg, 'origin'):
             return msg.origin.latitude, msg.origin.longitude
 
     raise RuntimeError("Navigation geographic origin not found")
 
+
 def get_nav_data(bag, nav_topic):
+    # Time interpolators for pose + altitude (yaw smoothed).
 
     ts, north, east, yaw, pitch, roll, alt = [], [], [], [], [], [], []
 
@@ -123,12 +132,13 @@ def get_nav_data(bag, nav_topic):
 
     return (f_n, f_e, f_y, f_p, f_r, f_h), (ts[0], ts[-1])
 
-# ================= MOSAIC =================
-def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
+def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
+    # Accumulate slant-corrected returns onto the UTM-local grid.
     f_n, f_e, f_y, f_p, f_r, f_h = nav
     t0, t1 = time_range
 
+    # Grid extent from the trajectory bounding box + range margin
     ts_samples = np.linspace(t0, t1, 500)
 
     east_samples = f_e(ts_samples)
@@ -179,17 +189,19 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
         if np.isnan(n) or np.isnan(e) or np.isnan(yaw) or np.isnan(h):
             continue
 
-        if h < 0.2:
+        if h < 0.2:   # sonar out of water / invalid
             continue
 
         scan = np.frombuffer(msg.data, dtype=np.uint8).astype(np.float32)
 
+        # Port is reversed so the nadir sits at the inner edge
         if "port" in topic.lower():
             scan = scan[::-1]
             T_sensor = T_PORT
         else:
             T_sensor = T_STBD
 
+        # Slant-range -> ground-range
         npx = scan.size
         meters_px = SONAR_RANGE / npx
 
@@ -201,12 +213,13 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
         if not np.any(valid_mask):
             continue
 
+        # Sensor lever-arm rotated into world
         sensor_offset = T_sensor[:3, 3]
 
         off_n = sensor_offset[0] * np.cos(yaw) - sensor_offset[1] * np.sin(yaw)
         off_e = sensor_offset[0] * np.sin(yaw) + sensor_offset[1] * np.cos(yaw)
 
-        # SIGNOS CORREGIDOS
+        # Across-track direction (opposite sign per side)
         if "port" in topic.lower():
             v_ping_n = np.sin(yaw)
             v_ping_e = -np.cos(yaw)
@@ -233,7 +246,6 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
     return img.reshape((height, width)), x_min, y_max
 
-# ================= MAIN =================
 def main():
 
     rospy.init_node('sss_mosaic_gen', anonymous=True)

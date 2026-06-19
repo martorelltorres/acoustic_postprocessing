@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Author: Antoni Martorell
-Affiliation: Systems, Robotics and Vision Group (SRV),
-             University of the Balearic Islands (UIB)
-Contact: antoni.martorell@uib.es
-License: This code is provided for research and academic purposes.
+Standalone (non-ROS) version of sss_mb_fusion.py with hardcoded paths.
+Textures the MB mesh with SSS intensity. Output: fused_data.ply.
+
+Author: Antoni Martorell (SRV, UIB)
 """
 
 import open3d as o3d
@@ -13,9 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
-# -----------------------------
-# CONFIGURACIÓN
-# -----------------------------
+# Paths and config
 MESH_FILE = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/mb_mesh.ply"
 SSS_TIF   = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/sss_mosaic.tif"
 OUTPUT_MESH = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/fused_data.ply"
@@ -23,29 +20,23 @@ OUTPUT_MESH = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/fused
 COLORMAP = cm.viridis     # gray, viridis, inferno, etc.
 NODATA_VALUE = 0
 
-# -----------------------------º
-# 1. CARGAR MALLA MB
-# -----------------------------
-print("Cargando malla MB...")
+# Load MB mesh
+print("Loading MB mesh...")
 mesh = o3d.io.read_triangle_mesh(MESH_FILE)
 mesh.compute_vertex_normals()
 
 vertices = np.asarray(mesh.vertices)
-print(f"Vértices: {len(vertices)}")
+print(f"Vertices: {len(vertices)}")
 
-# -----------------------------
-# 2. CARGAR MOSAICO SSS
-# -----------------------------
-print("Cargando mosaico SSS...")
+# Load SSS mosaic
+print("Loading SSS mosaic...")
 with rasterio.open(SSS_TIF) as src:
     sss = src.read(1)
     transform = src.transform
     nodata = src.nodata
 
-# -----------------------------
-# 3. PROYECCIÓN SSS → VÉRTICES
-# -----------------------------
-print("Proyectando intensidad SSS sobre la malla...")
+# Sample SSS intensity at each vertex (x, y) UTM
+print("Projecting SSS intensity onto the mesh...")
 
 intensity = np.zeros(len(vertices), dtype=np.float32)
 
@@ -63,30 +54,26 @@ for i, (x, y, z) in enumerate(vertices):
     except Exception:
         intensity[i] = NODATA_VALUE
 
-# -----------------------------
-# 4. NORMALIZAR + COLOR MAP
-# -----------------------------
-print("Normalizando intensidad y aplicando colormap...")
+# Normalize and apply colormap to vertices
+print("Normalizing intensity and applying colormap...")
 
 valid = intensity > NODATA_VALUE
-print(f"Vértices con intensidad válida: {np.sum(valid)} / {len(valid)}")
+print(f"Vertices with valid intensity: {np.sum(valid)} / {len(valid)}")
 
 if not np.any(valid):
     raise RuntimeError(
-        "ERROR: Ningún vértice del mesh intersecta con el mosaico SSS. "
-        "Revisa CRS, sistema de coordenadas y solapamiento espacial."
+        "ERROR: No mesh vertex intersects the SSS mosaic. "
+        "Check CRS, coordinate system and spatial overlap."
     )
 imin, imax = intensity[valid].min(), intensity[valid].max()
 int_norm = (intensity - imin) / (imax - imin + 1e-6)
 
-colors = COLORMAP(int_norm)[:, :3]  # RGBA → RGB
+colors = COLORMAP(int_norm)[:, :3]  # RGBA -> RGB
 
 mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
 
-# -----------------------------
-# 5. GUARDAR RESULTADO
-# -----------------------------
-print(f"Guardando malla texturizada: {OUTPUT_MESH}")
+# Save result
+print(f"Saving textured mesh: {OUTPUT_MESH}")
 o3d.io.write_triangle_mesh(OUTPUT_MESH, mesh)
 
-print("✅ Proyección completada correctamente")
+print("Projection completed.")

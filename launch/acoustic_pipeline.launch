@@ -1,64 +1,104 @@
 <launch>
-    <!-- ****************** MULTIBEAM PROCESSOR ****************** -->
-    
-    <arg name="mb_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/14_44_35/sparus2_multibeam_2025-10-28-14-44-35_0.bag"/>
+    <!-- Acoustic post-processing pipeline.
+         Toggle each product with its enable_* flag; nodes run only when true.
+           enable_mb_cloud       -> mb_pointcloud.xyz + mb_mesh.ply
+           enable_mb_intensity   -> mb_intensity.tif  + mb_intensity.xyz
+           enable_sss_mosaic     -> sss_mosaic.tif
+           enable_sss_waterfall  -> sss_waterfall.png
+           enable_mosaic_fusion  -> mb_sss_mosaic.tif (needs mb_intensity + sss_mosaic)
+           enable_fusion         -> mb_textured_sss.ply (needs mb_mesh + sss_mosaic) -->
+
+    <!-- Bags and output -->
+    <arg name="mb_bagfile"  default="/home/uib/bagfiles/cabrera/2025_10_28/14_44_35/sparus2_multibeam_2025-10-28-14-44-35_0.bag"/>
     <arg name="sss_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/10_56_48/sparus2_sidescan_2025-10-28-10-56-48_0.bag"/>
-    <!-- <arg name="mb_bagfile" default="/home/uib/bagfiles/minex/12_39_13/sparus2_multibeam_2025-05-13-12-42-09_0.bag"/>
-    <arg name="sss_bagfile" default="/home/uib/bagfiles/minex/13_09_35/sparus2_sidescan_2025-05-13-13-14-54_0.bag"/> -->
-    <arg name="output_dir" default="/home/uib/derelictes_ws/src/acoustic_postprocessing/results/"/>
-    
-    <arg name="offset_x" default="0.0"/>
-    <arg name="offset_y" default="0.0"/>
-    <arg name="offset_z" default="0.0"/>
-    <arg name="yaw_deg"  default="90.0"/>
+    <arg name="output_dir"  default="/home/uib/derelictes_ws/src/acoustic_postprocessing/results/"/>
 
-    <arg name="sor_k" default="50"/>
-    <arg name="sor_std" default="1.0"/>
-    <arg name="voxel_size" default="0.01"/>
+    <!-- Product selection -->
+    <arg name="enable_mb_cloud"      default="true"/>
+    <arg name="enable_mb_intensity"  default="true"/>
+    <arg name="enable_sss_mosaic"    default="true"/>
+    <arg name="enable_sss_waterfall" default="true"/>
+    <arg name="enable_mosaic_fusion" default="true"/>
+    <arg name="enable_fusion"        default="true"/>
 
-    <arg name="enable_slam" default="false"/>
-    <arg name="slam_map_voxel" default="0.5"/>
-    <arg name="slam_gicp_dist" default="2.0"/>
+    <!-- Multibeam cloud/mesh params -->
+    <arg name="voxel_size"   default="0.01"/>
+    <arg name="sor_k"        default="50"/>
+    <arg name="sor_std"      default="1.0"/>
+    <arg name="angle_cutoff" default="60.0"/>
 
-    <param name="use_sim_time" value="true"/>
-    
-    <node pkg="acoustic_postprocessing" type="multibeam_processor.py" name="mb_multi_proc" output="screen" >
-        <param name="bag_file"      value="$(arg mb_bagfile)" />
-        <param name="scan_topic"    value="/sparus2/norbit_wbms_multibeam/multibeam_scan" />
-        <param name="nav_topic"     value="/sparus2/navigator/navigation" />
-        <param name="output_dir"    value="$(arg output_dir)" />
-        
-        <param name="offset_x" value="$(arg offset_x)" />
-        <param name="offset_y" value="$(arg offset_y)" />
-        <param name="offset_z" value="$(arg offset_z)" />
-        <param name="sensor_yaw" value="$(eval arg('yaw_deg') * 3.14159265 / 180.0)" />
-        
-        <param name="sor_k" value="$(arg sor_k)"/>
-        <param name="sor_std" value="$(arg sor_std)"/>
-        <param name="voxel_size" value="$(arg voxel_size)"/>
-        
-        <param name="enable_slam" value="$(arg enable_slam)"/>
-        <param name="slam_map_voxel" value="$(arg slam_map_voxel)"/>
-        <param name="slam_gicp_dist" value="$(arg slam_gicp_dist)"/>
-    </node>
+    <!-- Multibeam intensity params -->
+    <arg name="mb_intensity_res"   default="0.10"/>
+    <arg name="mb_intensity_cloud" default="true"/>
 
-     <!-- ****************** SIDESCAN SONAR PROCESSOR ****************** -->
+    <!-- Mosaic fusion mode: max | mean | mb | sss -->
+    <arg name="mosaic_fusion_mode" default="max"/>
 
-     <node pkg="acoustic_postprocessing" type="sss2mosaic.py" name="sss_mosaic_gen" output="screen" >
-        <param name="bag_file" value="$(arg sss_bagfile)" />
-        <param name="output_dir" value="$(arg output_dir)" />
-        <param name="nav_topic"     value="/sparus2/navigator/navigation" />
-    </node>
+    <!-- Bags are read directly (not played), so no /clock is published.
+         use_sim_time must stay false or time-based waits would block forever. -->
+    <param name="use_sim_time" value="false"/>
 
-    <!-- <node pkg="acoustic_postprocessing" type="sss_waterfall.py" name="sss_waterfall_gen" output="screen">
-        <param name="bag_file" value="$(arg sss_bagfile)" />
-        <param name="output_dir" value="$(arg output_dir)" />
-    </node>  -->
+    <!-- Multibeam: bathymetry cloud + mesh -->
+    <group if="$(arg enable_mb_cloud)">
+        <node pkg="acoustic_postprocessing" type="multibeam_processor.py" name="mb_multi_proc" output="screen">
+            <param name="bag_file"     value="$(arg mb_bagfile)"/>
+            <param name="scan_topic"   value="/sparus2/norbit_wbms_multibeam/multibeam_scan"/>
+            <param name="nav_topic"    value="/sparus2/navigator/navigation"/>
+            <param name="output_dir"   value="$(arg output_dir)"/>
+            <param name="voxel_size"   value="$(arg voxel_size)"/>
+            <param name="sor_k"        value="$(arg sor_k)"/>
+            <param name="sor_std"      value="$(arg sor_std)"/>
+            <param name="angle_cutoff" value="$(arg angle_cutoff)"/>
+        </node>
+    </group>
 
-    <!-- <node pkg="acoustic_postprocessing" type="sss_mb_fusion.py" name="fusion_node" output="screen">
-        <param name="mesh_file" value="$(arg output_dir)/mb_mesh.ply" />
-        <param name="sss_tif"   value="$(arg output_dir)/sss_mosaic.tif" />
-        <param name="output_dir" value="$(arg output_dir)" />
-    </node>  -->
+    <!-- Multibeam: backscatter mosaic + intensity cloud -->
+    <group if="$(arg enable_mb_intensity)">
+        <node pkg="acoustic_postprocessing" type="multibeam_intensity.py" name="mb_intensity_proc" output="screen">
+            <param name="bag_file"     value="$(arg mb_bagfile)"/>
+            <param name="scan_topic"   value="/sparus2/norbit_wbms_multibeam/multibeam_scan"/>
+            <param name="nav_topic"    value="/sparus2/navigator/navigation"/>
+            <param name="output_dir"   value="$(arg output_dir)"/>
+            <param name="mosaic_res"   value="$(arg mb_intensity_res)"/>
+            <param name="angle_cutoff" value="$(arg angle_cutoff)"/>
+            <param name="save_cloud"   value="$(arg mb_intensity_cloud)"/>
+        </node>
+    </group>
+
+    <!-- Sidescan: georeferenced mosaic -->
+    <group if="$(arg enable_sss_mosaic)">
+        <node pkg="acoustic_postprocessing" type="sss2mosaic.py" name="sss_mosaic_gen" output="screen">
+            <param name="bag_file"   value="$(arg sss_bagfile)"/>
+            <param name="output_dir" value="$(arg output_dir)"/>
+            <param name="nav_topic"  value="/sparus2/navigator/navigation"/>
+        </node>
+    </group>
+
+    <!-- Sidescan: waterfall view (no GPS) -->
+    <group if="$(arg enable_sss_waterfall)">
+        <node pkg="acoustic_postprocessing" type="sss_waterfall.py" name="sss_waterfall_gen" output="screen">
+            <param name="bag_file"   value="$(arg sss_bagfile)"/>
+            <param name="output_dir" value="$(arg output_dir)"/>
+        </node>
+    </group>
+
+    <!-- Fuse MB backscatter mosaic + SSS mosaic -->
+    <group if="$(arg enable_mosaic_fusion)">
+        <node pkg="acoustic_postprocessing" type="mb_sss_mosaic_fusion.py" name="mosaic_fusion" output="screen">
+            <param name="mb_tif"     value="$(arg output_dir)/mb_intensity.tif"/>
+            <param name="sss_tif"    value="$(arg output_dir)/sss_mosaic.tif"/>
+            <param name="output_dir" value="$(arg output_dir)"/>
+            <param name="mode"       value="$(arg mosaic_fusion_mode)"/>
+        </node>
+    </group>
+
+    <!-- Texture MB mesh (geometry) with SSS mosaic (intensity) -->
+    <group if="$(arg enable_fusion)">
+        <node pkg="acoustic_postprocessing" type="sss_mb_fusion.py" name="fusion_node" output="screen">
+            <param name="mesh_file"  value="$(arg output_dir)/mb_mesh.ply"/>
+            <param name="sss_tif"    value="$(arg output_dir)/sss_mosaic.tif"/>
+            <param name="output_dir" value="$(arg output_dir)"/>
+        </node>
+    </group>
 
 </launch>

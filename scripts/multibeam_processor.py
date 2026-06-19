@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Multibeam Point Cloud Processing and Surface Reconstruction
-Fully aligned with sss2mosaic.py + automatic MB→SSS lever-arm correction
+Multibeam point cloud -> georeferenced cloud + Poisson surface mesh.
+Shares geometry with multibeam_intensity.py (same axis flip, sensor TF and
+MB->SSS lever-arm) so all products live in the same UTM frame.
 
-Author: Antoni Martorell
+Author: Antoni Martorell (SRV, UIB)
 """
 
 import rospy
@@ -19,17 +20,14 @@ from pyproj import Transformer
 from std_msgs.msg import Bool
 import time
 
-# =========================================================
-# CRS CONFIG
-# =========================================================
+# Geographic -> UTM (zone 31N)
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM   = "EPSG:32631"
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
 
-# =========================================================
-# TF
-# =========================================================
+
 def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
+    # First parent->child transform found in /tf_static or /tf (4x4).
 
     bag = rosbag.Bag(bag_file)
 
@@ -50,20 +48,16 @@ def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
     bag.close()
     return np.identity(4)
 
-# =========================================================
-# NAV ORIGIN
-# =========================================================
-def get_nav_origin(bag, nav_topic):
 
+def get_nav_origin(bag, nav_topic):
+    # Geographic origin (lat, lon) of the local navigation frame.
     for _, msg, _ in bag.read_messages(topics=[nav_topic]):
         if hasattr(msg, 'origin'):
             return msg.origin.latitude, msg.origin.longitude
 
     raise RuntimeError("Navigation origin not found")
 
-# =========================================================
-# MAIN
-# =========================================================
+
 def main():
 
     rospy.init_node('multibeam_processor')
@@ -84,26 +78,19 @@ def main():
 
     bag = rosbag.Bag(bag_file)
 
-    # =====================================================
-    # ORIGIN
-    # =====================================================
+    # UTM origin
     lat0, lon0 = get_nav_origin(bag, nav_topic)
     X0_UTM, Y0_UTM = ll_to_utm.transform(lon0, lat0)
 
     rospy.loginfo(f"UTM origin: {X0_UTM:.3f}, {Y0_UTM:.3f}")
 
-    # =====================================================
-    # TF MULTIBEAM
-    # =====================================================
+    # Sensor TFs (multibeam + sidescan, for the lever-arm)
     T_MB = get_static_transform_from_tf(
         bag_file,
         'sparus2/base_link',
         'sparus2/multibeam'
     )
 
-    # =====================================================
-    # TF SIDESCAN
-    # =====================================================
     T_PORT = get_static_transform_from_tf(
         bag_file,
         'sparus2/base_link',
@@ -119,9 +106,7 @@ def main():
     R_sensor = T_MB[:3, :3]
     sensor_offset = T_MB[:3, 3]
 
-    # =====================================================
-    # AUTOMATIC MB→SSS LEVER ARM
-    # =====================================================
+    # MB->SSS lever-arm: align cloud onto the sidescan mosaic frame
     sss_center = 0.5 * (T_PORT[:3, 3] + T_STBD[:3, 3])
 
     delta_sensor = (sss_center - sensor_offset) + np.array([0.0, -2, 0.0])
@@ -130,9 +115,7 @@ def main():
     rospy.loginfo(f"SSS center     : {sss_center}")
     rospy.loginfo(f"Lever-arm delta: {delta_sensor}")
 
-    # =====================================================
-    # NAVIGATION
-    # =====================================================
+    # Navigation: build time interpolators for pose
     ts_nav = []
     north = []
     east = []
@@ -163,9 +146,7 @@ def main():
     f_p = interp1d(ts_nav, np.unwrap(np.array(pitch)), bounds_error=False, fill_value=np.nan)
     f_r = interp1d(ts_nav, np.unwrap(np.array(roll)), bounds_error=False, fill_value=np.nan)
 
-    # =====================================================
-    # PROCESS
-    # =====================================================
+    # Per-ping processing: sensor frame -> vehicle -> local -> UTM
     rospy.loginfo("Processing multibeam pings...")
 
     buffer_points = []
@@ -200,8 +181,10 @@ def main():
         if len(pc) < 10:
             continue
 
+        # Flip to match the sensor TF convention (seafloor stays below)
         xyz = np.column_stack((pc['x'], -pc['y'], -pc['z']))
 
+        # Drop grazing outer beams
         r_horizontal = np.sqrt(xyz[:,0]**2 + xyz[:,1]**2)
         depth_s = np.abs(xyz[:,2])
 
@@ -211,14 +194,10 @@ def main():
         if len(xyz) < 10:
             continue
 
-        # =================================================
-        # SENSOR ROTATION
-        # =================================================
+        # Sensor rotation
         xyz = xyz @ R_sensor.T
 
-        # =================================================
-        # VEHICLE ROTATION
-        # =================================================
+        # Vehicle rotation
         R_veh = tr.euler_matrix(
             roll_t,
             pitch_t,
@@ -228,9 +207,7 @@ def main():
 
         xyz = xyz @ R_veh.T
 
-        # =================================================
-        # OFFSET identical to SSS
-        # =================================================
+        # Lever-arm offsets (same as intensity pipeline)
         offset_world = R_veh @ sensor_offset
 
         delta_world = R_veh @ delta_sensor
@@ -241,16 +218,12 @@ def main():
         xyz[:,1] += offset_world[1]
         xyz[:,2] += offset_world[2]
 
-        # =================================================
-        # LOCAL WORLD
-        # =================================================
+        # Local world (north, east, -depth)
         xyz[:,0] += n
         xyz[:,1] += e
         xyz[:,2] += -d
 
-        # =================================================
-        # UTM
-        # =================================================
+        # To UTM (X=easting, Y=northing)
         pts_world = np.zeros_like(xyz)
 
         pts_world[:,0] = X0_UTM + xyz[:,1]
@@ -267,9 +240,7 @@ def main():
         rospy.logerr("No valid points")
         return
 
-    # =====================================================
-    # POINT CLOUD
-    # =====================================================
+    # Point cloud: outlier removal + voxel downsample
     pts_all = np.vstack(buffer_points)
 
     pcd = o3d.geometry.PointCloud()
@@ -283,9 +254,7 @@ def main():
 
     rospy.loginfo(f"XYZ saved: {xyz_file}")
 
-    # =====================================================
-    # MESH
-    # =====================================================
+    # Mesh: center for numerical stability, then Poisson reconstruction
     pts = np.asarray(pcd.points)
 
     centroid = pts.mean(axis=0)
@@ -310,12 +279,14 @@ def main():
         depth=11
     )
 
+    # Trim low-density (extrapolated) vertices
     densities = np.asarray(densities)
 
     threshold = np.percentile(densities, 5)
 
     mesh.remove_vertices_by_mask(densities < threshold)
 
+    # Back to absolute UTM coordinates
     vertices = np.asarray(mesh.vertices) + centroid
     mesh.vertices = o3d.utility.Vector3dVector(vertices)
 
