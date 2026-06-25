@@ -1,1 +1,6 @@
 results/
+
+# Python bytecode (regenerado automáticamente; no debe versionarse)
+__pycache__/
+*.py[cod]
+*$py.class

@@ -23,18 +23,36 @@
 <!-- mb -->
 <!-- sparus2_multibeam_2026-05-07-06-42-24_0.bag derelictes -->
     
-    <arg name="output_dir" default="/home/uib/derelictes_ws/src/acoustic_postprocessing/results/"/>
+    <arg name="output_dir" default="$(find acoustic_postprocessing)/results/"/>
     <arg name="robot_name" default="sparus2"/>
     <arg name="sor_k" default="50"/>
     <arg name="sor_std" default="1.0"/>
     <arg name="voxel_size" default="0.01"/>
+
+    <!-- ****************** PATCH / PREPROCESADO ****************** -->
+    <!-- Barridos por patch y avance entre patches (solape = 1 - stride/size). -->
+    <arg name="patch_size"        default="100"/>
+    <arg name="patch_stride"      default="20"/>
+    <!-- Voxel de submuestreo del patch (m) y voxel del mapa final (m). -->
+    <arg name="patch_voxel_size"  default="0.25"/>
+    <arg name="final_downsample"  default="0.2"/>
+    <!-- Recorte por ángulo de incidencia desde el nadir (grados); descarta los
+         haces más rasantes y ruidosos. -->
+    <arg name="angle_cutoff_deg"  default="55.0"/>
+
+    <!-- ****************** UMBRALES DE CALIDAD (SECUENCIAL) ****************** -->
+    <arg name="fitness_threshold"   default="0.55"/>
+    <arg name="seq_rmse_threshold"  default="0.375"/>   <!-- ≈ patch_voxel_size*1.5 -->
+    <arg name="min_correspondences" default="100"/>
     <!-- registration_algorithm: icp | colored_icp | hybrid | ndt
          hybrid = geometría donde hay relieve, intensidad donde el fondo es liso -->
     <arg name="registration_algorithm"        default="hybrid"/>
     <!-- Colored ICP: peso geométrico (1.0=solo geometría, menor=más intensidad) -->
     <arg name="colored_icp_lambda"            default="0.6"/>
-    <!-- hybrid: fracción mínima de relieve para usar geometría (si no, intensidad) -->
-    <arg name="hybrid_min_texture"            default="0.2"/>
+    <!-- hybrid: fracción mínima de relieve (normales no verticales) para usar
+         geometría; por debajo se registra con intensidad. Coincide con el
+         default del código (HYBRID_MIN_TEXTURE). -->
+    <arg name="hybrid_min_texture"            default="0.08"/>
     <!-- Sequential ICP–navigation consistency gates -->
     <arg name="max_seq_icp_translation_dev"  default="0.5"/>
     <arg name="max_seq_icp_yaw_dev"          default="15.0"/>
@@ -58,7 +76,19 @@
     <arg name="min_ins_dist_for_ratio_check" default="2.0"/>
     <!-- Gap temporal mínimo entre patches para ser candidato a loop closure. -->
     <arg name="min_loop_temporal_gap"        default="25"/>
+    <!-- Selección de candidatos por Scan Context: umbral de distancia (menor =
+         más similar) y nº máximo de candidatos por patch a evaluar con ICP. -->
+    <arg name="scan_context_threshold"       default="0.15"/>
+    <arg name="max_loop_candidates"          default="3"/>
+    <!-- Umbrales de aceptación del cierre (más estrictos que el secuencial). -->
+    <arg name="loop_fitness_threshold"       default="0.90"/>
+    <arg name="loop_rmse_threshold"          default="0.375"/> <!-- ≈ patch_voxel_size*1.5 -->
+    <arg name="max_loop_z_translation"       default="0.5"/>
+    <arg name="max_loop_xy_translation"      default="8.0"/>
+    <arg name="max_loop_yaw_deg"             default="20.0"/>
     <arg name="enable_monitor" default="true"/>
+    <!-- Cada cuántas iteraciones del registro secuencial se refresca el monitor. -->
+    <arg name="monitor_update_every" default="5"/>
     <arg name="monitor_zoom" default="0.18"/>
     <arg name="monitor_min_zoom" default="0.03"/>
     <arg name="monitor_margin" default="2.5"/>
@@ -68,7 +98,7 @@
     <arg name="monitor_cloud_window" default="15"/>
     <arg name="monitor_cloud_voxel"  default="0.4"/>
 
-    <param name="use_sim_time" value="true"/>
+    <param name="use_sim_time" value="false"/>
 
     <include file="$(find sparus2_description)/launch/sparus2_description.launch">
         <arg name="robot_name" value="$(arg robot_name)"/>
@@ -89,7 +119,15 @@
         <param name="bag_file"      value="$(arg mb_bagfile)" />
         <param name="scan_topic"    value="/sparus2/norbit_wbms_multibeam/multibeam_scan" />
         <param name="nav_topic"     value="/sparus2/navigator/navigation" />
-        <param name="output_dir"    value="$(arg output_dir)" />   
+        <param name="output_dir"    value="$(arg output_dir)" />
+        <param name="patch_size"        value="$(arg patch_size)" />
+        <param name="patch_stride"      value="$(arg patch_stride)" />
+        <param name="patch_voxel_size"  value="$(arg patch_voxel_size)" />
+        <param name="final_downsample"  value="$(arg final_downsample)" />
+        <param name="angle_cutoff_deg"  value="$(arg angle_cutoff_deg)" />
+        <param name="fitness_threshold"   value="$(arg fitness_threshold)" />
+        <param name="seq_rmse_threshold"  value="$(arg seq_rmse_threshold)" />
+        <param name="min_correspondences" value="$(arg min_correspondences)" />
         <param name="registration_algorithm"       value="$(arg registration_algorithm)" />
         <param name="colored_icp_lambda"            value="$(arg colored_icp_lambda)" />
         <param name="hybrid_min_texture"            value="$(arg hybrid_min_texture)" />
@@ -107,7 +145,15 @@
         <param name="min_loop_icp_ins_ratio"        value="$(arg min_loop_icp_ins_ratio)" />
         <param name="min_ins_dist_for_ratio_check"  value="$(arg min_ins_dist_for_ratio_check)" />
         <param name="min_loop_temporal_gap"         value="$(arg min_loop_temporal_gap)" />
+        <param name="scan_context_threshold"        value="$(arg scan_context_threshold)" />
+        <param name="max_loop_candidates"           value="$(arg max_loop_candidates)" />
+        <param name="loop_fitness_threshold"        value="$(arg loop_fitness_threshold)" />
+        <param name="loop_rmse_threshold"           value="$(arg loop_rmse_threshold)" />
+        <param name="max_loop_z_translation"        value="$(arg max_loop_z_translation)" />
+        <param name="max_loop_xy_translation"       value="$(arg max_loop_xy_translation)" />
+        <param name="max_loop_yaw_deg"              value="$(arg max_loop_yaw_deg)" />
         <param name="enable_monitor" value="$(arg enable_monitor)" />
+        <param name="monitor_update_every" value="$(arg monitor_update_every)" />
         <param name="monitor_zoom" value="$(arg monitor_zoom)" />
         <param name="monitor_min_zoom" value="$(arg monitor_min_zoom)" />
         <param name="monitor_margin" value="$(arg monitor_margin)" />

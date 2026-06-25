@@ -8,6 +8,27 @@ FULL METRICS + CONNECTED POSE GRAPH + RAW/SLAM MAP EXPORT
 """
 
 import os
+
+# -----------------------------------------------------------------------------
+# PERF: política de espera de los pools de hilos (OpenMP / OpenBLAS).
+# Open3D y NumPy/SciPy cargan cada uno su runtime OpenMP + OpenBLAS. Por defecto
+# los hilos ociosos hacen BUSY-WAIT (spin) sobre un futex entre llamadas, lo que
+# satura ~todos los cores sin trabajo útil (efecto "373% de CPU fantasma").
+#   - OMP_WAIT_POLICY=passive  → los hilos ociosos DUERMEN en vez de spinear.
+#   - *_NUM_THREADS acotado     → evita que los dos pools peleen por los cores.
+# Esto NO altera ningún resultado numérico: el trabajo paralelo real sigue igual,
+# solo se elimina el spin desperdiciado. DEBE ir antes de importar open3d/numpy.
+# -----------------------------------------------------------------------------
+os.environ.setdefault("OMP_WAIT_POLICY", "passive")
+_n_threads = str(max(1, (os.cpu_count() or 4) // 2))
+for _var in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_var, _n_threads)
+
 import copy
 import json
 import csv
@@ -19,6 +40,13 @@ import ros_numpy
 import numpy as np
 import open3d as o3d
 import tf.transformations as tr
+
+# PERF: acota el pool de hilos interno de Open3D al mismo nivel que los demás
+# (refuerza OMP_NUM_THREADS desde la propia API). No cambia resultados.
+try:
+    o3d.utility.set_num_threads(int(_n_threads))
+except (AttributeError, ValueError):
+    pass
 
 from tqdm import tqdm
 from scipy.interpolate import interp1d
@@ -1467,6 +1495,36 @@ def main():
     global SEQ_ANCHOR_SCALE, SEQ_CROSS_TRACK_GAIN
     global MAX_LOOP_INS_DISTANCE, MIN_LOOP_ICP_INS_RATIO, MIN_INS_DIST_FOR_RATIO_CHECK
     global MIN_LOOP_TEMPORAL_GAP
+    # Patch / preprocesado y umbrales de calidad, ahora configurables desde el
+    # launch. Eran constantes module-level usadas directamente por PatchBuilder
+    # y los bucles de registro; se reasignan aquí para no cambiar su uso.
+    global PATCH_SIZE, PATCH_STRIDE, VOXEL_SIZE, FINAL_DOWNSAMPLE, ANGLE_CUTOFF_DEG
+    global FITNESS_THRESHOLD, SEQ_RMSE_THRESHOLD, MIN_CORRESPONDENCES
+    global SCAN_CONTEXT_THRESHOLD, MAX_LOOP_CANDIDATES
+    global LOOP_FITNESS_THRESHOLD, LOOP_RMSE_THRESHOLD
+    global MAX_LOOP_Z_TRANSLATION, MAX_LOOP_XY_TRANSLATION, MAX_LOOP_YAW_DEG
+    global MONITOR_UPDATE_EVERY
+
+    PATCH_SIZE = max(1, int(rospy.get_param("~patch_size", PATCH_SIZE)))
+    PATCH_STRIDE = max(1, int(rospy.get_param("~patch_stride", PATCH_STRIDE)))
+    VOXEL_SIZE = float(rospy.get_param("~patch_voxel_size", VOXEL_SIZE))
+    FINAL_DOWNSAMPLE = float(rospy.get_param("~final_downsample", FINAL_DOWNSAMPLE))
+    ANGLE_CUTOFF_DEG = float(rospy.get_param("~angle_cutoff_deg", ANGLE_CUTOFF_DEG))
+
+    FITNESS_THRESHOLD = float(rospy.get_param("~fitness_threshold", FITNESS_THRESHOLD))
+    SEQ_RMSE_THRESHOLD = float(rospy.get_param("~seq_rmse_threshold", SEQ_RMSE_THRESHOLD))
+    MIN_CORRESPONDENCES = int(rospy.get_param("~min_correspondences", MIN_CORRESPONDENCES))
+
+    SCAN_CONTEXT_THRESHOLD = float(rospy.get_param("~scan_context_threshold", SCAN_CONTEXT_THRESHOLD))
+    MAX_LOOP_CANDIDATES = int(rospy.get_param("~max_loop_candidates", MAX_LOOP_CANDIDATES))
+    LOOP_FITNESS_THRESHOLD = float(rospy.get_param("~loop_fitness_threshold", LOOP_FITNESS_THRESHOLD))
+    LOOP_RMSE_THRESHOLD = float(rospy.get_param("~loop_rmse_threshold", LOOP_RMSE_THRESHOLD))
+    MAX_LOOP_Z_TRANSLATION = float(rospy.get_param("~max_loop_z_translation", MAX_LOOP_Z_TRANSLATION))
+    MAX_LOOP_XY_TRANSLATION = float(rospy.get_param("~max_loop_xy_translation", MAX_LOOP_XY_TRANSLATION))
+    MAX_LOOP_YAW_DEG = float(rospy.get_param("~max_loop_yaw_deg", MAX_LOOP_YAW_DEG))
+
+    # max(1, ...): evita división por cero en `idx % MONITOR_UPDATE_EVERY`.
+    MONITOR_UPDATE_EVERY = max(1, int(rospy.get_param("~monitor_update_every", MONITOR_UPDATE_EVERY)))
 
     MAX_SEQ_ICP_TRANSLATION_DEV = float(rospy.get_param(
         "~max_seq_icp_translation_dev",
@@ -1591,6 +1649,19 @@ def main():
             f"intensity where flat (min_texture={hybrid_min_texture:.2f}, "
             f"lambda_geometric={colored_icp_lambda:.2f})"
         )
+
+    rospy.loginfo(
+        f"Patch/preprocess — size={PATCH_SIZE} stride={PATCH_STRIDE} "
+        f"(overlap={100.0 * (1.0 - PATCH_STRIDE / max(PATCH_SIZE, 1)):.0f}%)  "
+        f"voxel={VOXEL_SIZE:.2f}m  final_downsample={FINAL_DOWNSAMPLE:.2f}m  "
+        f"angle_cutoff={ANGLE_CUTOFF_DEG:.1f}deg"
+    )
+
+    rospy.loginfo(
+        f"Sequential quality gates — fitness>={FITNESS_THRESHOLD:.2f}  "
+        f"rmse<={SEQ_RMSE_THRESHOLD:.3f}m  "
+        f"min_correspondences={MIN_CORRESPONDENCES}"
+    )
 
     rospy.loginfo(
         f"ICP–nav consistency gates — "

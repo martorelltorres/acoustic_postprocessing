@@ -3,22 +3,25 @@
 cmake_minimum_required(VERSION 3.0.2)
 project(acoustic_postprocessing)
 
-# Buscar los paquetes que necesita este paquete
-find_package(catkin REQUIRED COMPONENTS 
-  rospy 
-  std_msgs 
+# Buscar los paquetes que necesita este paquete. Debe coincidir con los
+# <depend>/<buildtool_depend> de package.xml.
+find_package(catkin REQUIRED COMPONENTS
+  rospy
+  nav_msgs
   ros_numpy
-  # Añade aquí otros paquetes ROS que uses si son necesarios en C++
 )
 
-# Configurar el paquete para Python
+# Exporta este paquete a otros (no expone librerías C++; solo metadatos catkin).
+catkin_package()
+
+# Configura el paquete para Python (lee setup.py / genera metadatos catkin).
 catkin_python_setup()
 
-# Instalar Scripts (Ejecutables)
-# Esto le dice a Catkin que haga el script ejecutable y lo mueva a 'devel/lib/acoustic_postprocessing/'
-catkin_python_setup()
-
-# Instalar archivos de cabecera si los hubiera (no aplica aquí)
-# install(DIRECTORY launch/
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+# Instala los scripts como ejecutables en
+# 'lib/acoustic_postprocessing/' para que rosrun/roslaunch los encuentren
+# también tras 'catkin_make install'.
+catkin_install_python(PROGRAMS
+  scripts/multibeam_slam.py
+  scripts/make_presentation_media.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)

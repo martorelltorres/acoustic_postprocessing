@@ -3,6 +3,8 @@
 import open3d as o3d
 import numpy as np
 
+from collections import OrderedDict
+
 
 # Umbral mínimo de correspondencias para considerar un resultado ICP válido.
 # Si ninguna escala supera este umbral el resultado se descarta.
@@ -21,17 +23,19 @@ _MIN_ICP_CORRESPONDENCES = 30
 # sin límite (LRU simple por inserción).
 # -----------------------------------------------------------------------------
 
-_PREP_CACHE = {}
+_PREP_CACHE = OrderedDict()
 _PREP_CACHE_MAX = 4096
 
 
 def _preprocessed(pcd, voxel):
-    """voxel_down_sample + estimate_normals con caché por (id(pcd), voxel)."""
+    """voxel_down_sample + estimate_normals con caché LRU por (id(pcd), voxel)."""
 
     key = (id(pcd), round(voxel, 4))
 
     cached = _PREP_CACHE.get(key)
     if cached is not None:
+        # Refresca la posición LRU: lo recién usado pasa a ser lo más reciente.
+        _PREP_CACHE.move_to_end(key)
         return cached
 
     down = pcd.voxel_down_sample(voxel)
@@ -44,10 +48,12 @@ def _preprocessed(pcd, voxel):
             )
         )
 
+    # Evicción LRU real: descarta SOLO la entrada menos usada recientemente, en
+    # vez de vaciar todo el caché. En loop closure un mismo patch se preprocesa
+    # muchas veces; vaciar el caché entero obligaba a recalcular nubes que se
+    # volvían a pedir de inmediato. El resultado preprocesado es idéntico.
     if len(_PREP_CACHE) >= _PREP_CACHE_MAX:
-        # Evicción simple: vacía el caché cuando se llena. Suficiente porque
-        # los patches se procesan en orden y la localidad temporal es alta.
-        _PREP_CACHE.clear()
+        _PREP_CACHE.popitem(last=False)
 
     _PREP_CACHE[key] = down
     return down

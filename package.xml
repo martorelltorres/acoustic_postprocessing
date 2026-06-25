@@ -2,9 +2,15 @@
 <package format="2">
   <name>acoustic_postprocessing</name>
   <version>0.0.0</version>
-  <description>TODO</description>
+  <description>
+    SLAM multihaz submarino en postproceso para el AUV Sparus2 (misiones
+    MINEX / Derelictes). Reconstruye un mapa 3D batimétrico del fondo marino a
+    partir de rosbags de sonar multihaz (MBES, Norbit WBMS) + navegación
+    inercial (INS), corrigiendo la deriva mediante un grafo de poses (Open3D)
+    con salvaguardas específicas para fondo plano sin relieve.
+  </description>
   <maintainer email="antoni.martorell@uib.es">uib</maintainer>
-  <license>TODO</license>
+  <license>BSD</license>
 
   <buildtool_depend>catkin</buildtool_depend>
   <depend>rospy</depend>

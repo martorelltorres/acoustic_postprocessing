@@ -83,7 +83,7 @@ def compute_scan_context(
 # para ser invariante a la orientación del vehículo.
 # =============================================================================
 
-def scan_context_distance(desc1, desc2):
+def scan_context_distance(desc1, desc2, rk1_fft=None, rk2_fft=None):
 
     # Ring key: media de cada columna → vector 1D compacto para preselección
     rk1 = desc1.mean(axis=0)
@@ -96,9 +96,17 @@ def scan_context_distance(desc1, desc2):
         return 1.0
 
     # Encontrar el desplazamiento de columna óptimo vía correlación circular
-    # Equivalente eficiente a probar todos los shifts pero en O(S log S)
+    # Equivalente eficiente a probar todos los shifts pero en O(S log S).
+    # PERF: la FFT del ring-key es invariante por patch; si el llamante la pasa
+    # precalculada (rk1_fft, rk2_fft) se evita recalcular la MISMA FFT en cada
+    # comparación. El resultado (la correlación) es idéntico.
+    if rk1_fft is None:
+        rk1_fft = np.fft.fft(rk1)
+    if rk2_fft is None:
+        rk2_fft = np.fft.fft(rk2)
+
     corr = np.fft.ifft(
-        np.fft.fft(rk1) * np.conj(np.fft.fft(rk2))
+        rk1_fft * np.conj(rk2_fft)
     ).real
 
     best_shift = int(np.argmax(corr))
@@ -160,6 +168,11 @@ class ScanContextManager:
         # Ring keys precalculadas para búsqueda rápida por columnas
         self._ring_keys = []
 
+        # PERF: FFT del ring-key precalculada por patch. La correlación circular
+        # de scan_context_distance la reutiliza en cada comparación en vez de
+        # recalcular dos FFT por par (mismo resultado, mucho menos cómputo).
+        self._ring_key_ffts = []
+
         # Posiciones INS (norte, este) por patch, para el pre-filtro espacial.
         # Opcional: si no se proporcionan, la búsqueda recae al O(N²) clásico.
         self._ins_xy = []
@@ -190,7 +203,9 @@ class ScanContextManager:
         self.descriptors.append(desc)
 
         # Ring key: media por columna (sector) → vector 1D para preselección
-        self._ring_keys.append(desc.mean(axis=0))
+        ring_key = desc.mean(axis=0)
+        self._ring_keys.append(ring_key)
+        self._ring_key_ffts.append(np.fft.fft(ring_key))
 
         if ins_xy is not None:
             self._ins_xy.append(
@@ -227,6 +242,7 @@ class ScanContextManager:
             return []
 
         query_desc = self.descriptors[query_idx]
+        query_fft = self._ring_key_ffts[query_idx]
 
         # -- Conjunto de candidatos a evaluar --------------------------------
         use_spatial = (
@@ -260,7 +276,9 @@ class ScanContextManager:
 
             dist = scan_context_distance(
                 query_desc,
-                self.descriptors[i]
+                self.descriptors[i],
+                rk1_fft=query_fft,
+                rk2_fft=self._ring_key_ffts[i]
             )
 
             distances.append((i, dist))

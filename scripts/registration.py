@@ -3,10 +3,40 @@
 import open3d as o3d
 import numpy as np
 
+from collections import OrderedDict
+
+
+# -----------------------------------------------------------------------------
+# PERF: CACHÉ DE FPFH POR NUBE
+# -----------------------------------------------------------------------------
+# En el loop closure cada patch participa como source o target en MUCHOS pares
+# candidatos, y preprocess_pointcloud recalcula downsample + normales + FPFH
+# (lo más caro: max_nn=100) sobre la MISMA nube cada vez. El FPFH de un patch es
+# invariante (no depende del par), así que se cachea por (id(pcd), voxel) y se
+# reutiliza. El RANSAC recibe exactamente las mismas features → resultado
+# idéntico, con una fracción del cómputo. La clave id(pcd) es estable porque los
+# patches son objetos persistentes durante todo el run.
+# -----------------------------------------------------------------------------
+
+_FPFH_CACHE = OrderedDict()
+_FPFH_CACHE_MAX = 4096
+
+
+def clear_fpfh_cache():
+    """Limpia el caché de FPFH (llamar entre runs si procede)."""
+    _FPFH_CACHE.clear()
+
 
 def preprocess_pointcloud(
         pcd,
         voxel_size):
+
+    key = (id(pcd), round(voxel_size, 4))
+
+    cached = _FPFH_CACHE.get(key)
+    if cached is not None:
+        _FPFH_CACHE.move_to_end(key)
+        return cached
 
     pcd_down = pcd.voxel_down_sample(
         voxel_size
@@ -34,6 +64,11 @@ def preprocess_pointcloud(
             )
         )
     )
+
+    if len(_FPFH_CACHE) >= _FPFH_CACHE_MAX:
+        _FPFH_CACHE.popitem(last=False)
+
+    _FPFH_CACHE[key] = (pcd_down, fpfh)
 
     return pcd_down, fpfh
 
