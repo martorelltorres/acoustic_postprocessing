@@ -10,6 +10,72 @@ Estado: ✅ completada · ⬜ pendiente.
 
 ---
 
+# 🔬 Línea SOTA (ver background/PROPUESTA_SLAM_SOTA.md)
+
+Plan basado en la revisión del estado del arte (Palomer 2016, Barkby 2009/2011,
+Torroba 2020/SVGP, Tan 2022, Teng 2020) para el escenario real: **pasadas paralelas
+sin cruces**. Fases R0→R3 (ver §5bis de la propuesta).
+
+- ✅ 🔴 **R0.1 — Métrica de consistency error (Roman 2006)** *(2026-06-26)*.
+  Nuevo módulo `scripts/consistency.py` (núcleo unit-testeable + adaptador
+  `consistency_error_from_patches`). Cableado en `main()`: calcula el error ANTES
+  (nav bruta) y DESPUÉS (grafo optimizado), lo vuelca a `metrics["consistency"]` y lo
+  loguea. Param `~consistency_cell_size` (default 1.0 m) expuesto en el launch. Es el
+  instrumento de medida primario del SOTA (dispersión vertical en zonas de solape,
+  incl. solape adyacente entre franjas). Validado con casos sintéticos. **Falta
+  re-lanzar el pipeline** para obtener el primer número real sobre Cabrera.
+- ✅ 🔴 **R0.2 — Restricción de solape adyacente entre franjas paralelas** *(2026-06-26)*.
+  Nueva fase `cross_track` en `main()` (tras loop closure, antes de la optimización):
+  KD-tree espacial sobre las posiciones INS busca pares de franjas VECINAS (banda de
+  distancia INS `[xtrack_min/max_ins_dist]`, gap temporal `xtrack_min_temporal_gap`),
+  los registra sembrando con el prior INS (`expected_transform`) y añade aristas
+  `uncertain=True` si son coherentes (fitness + discrepancia vs prior). Es el corazón
+  de Torroba 2020 (corrige deriva entre líneas sin cruces). 7 params en el launch.
+  Validado sobre la trayectoria real: selecciona 443 pares (franjas a ~7 m, gap≥40).
+- ✅ 🔴 **R0.3 — Registro/grafo 3-DoF gravity-constrained nativo** *(2026-06-26)*.
+  Nueva `utils.project_to_3dof()` (yaw+XY del registro, Z+roll/pitch del prior INS).
+  La arista cross-track la usa; documentada la restauración vertical como el componente
+  3-DoF coherente del back-end. Valida la decisión del usuario (Torroba/Tan: 3-DoF>6-DoF).
+- ✅ 🔴 **R1 — pICP: información de arista anisótropa** *(2026-06-26)*. Nuevo módulo
+  `scripts/registration_covariance.py` (covarianza 3-DoF tipo Censi 2007 desde el
+  Hessiano del coste punto-a-plano). Helper `edge_information()` reemplaza el
+  `dynamic_information_matrix` isótropo en las 3 aristas (secuencial/loop/cross-track).
+  En fondo plano da información baja cross-track (resuelve el deslizamiento de raíz).
+  Validado: ratio cov plano/relieve = 1.4e7. Param `~use_registration_covariance`.
+- ✅ 🔴 **R2 — Back-end robusto (line process de Choi 2015 ≈ Switchable Constraints)**
+  *(2026-06-26)*. Activado el line process de Open3D vía `preference_loop_closure`
+  (0.6, más escéptico con loops/cross-track) + `edge_prune_threshold`. Desactiva
+  automáticamente aristas espurias (falsos positivos de franja paralela) sin gates
+  manuales. Diagnóstico `metrics["robust_backend"]`. Validado: un loop falso NO
+  colapsa el grafo. Params en el launch.
+- ✅ 🟡 **R3 — Backscatter en el modelo de incertidumbre (aportación novel)**
+  *(2026-06-26)*. `intensity_informativeness()` (entropía×dispersión del canal de
+  intensidad) + `fuse_geometry_intensity_cov()`: donde la geometría es plana pero el
+  backscatter tiene textura, reduce la incertidumbre cross-track. Cableado en
+  `edge_information`. Ni Palomer ni Torroba/Tan usan intensidad en su covarianza →
+  es el diferencial publicable. PointNetKL queda como evolución (misma interfaz).
+  Validado: texturado 1000→50, uniforme 1000→992. Params en el launch.
+
+- ✅ 🟡 **Script de ablación** *(2026-06-26)*. `scripts/run_ablation.py` lanza el
+  pipeline con las combinaciones de flags (R0 → R1 → R1R2 → FULL), recopila el
+  consistency error de cada `slam_metrics.json` y produce tabla + `ablation_summary.csv`
+  en `results/ablation/`. Vigila la aparición de slam_metrics.json para terminar cada
+  roslaunch sin esperar timeout (el nodo no es `required`). Añadido a
+  `catkin_install_python`. Uso: `rosrun acoustic_postprocessing run_ablation.py`
+  (requiere `catkin_make`/`catkin build` para instalar el nuevo script).
+
+> **Pendiente común a R0–R3: re-lanzar el pipeline sobre Cabrera** para medir el
+> consistency error real y hacer la ablación (R0 baseline → +R1 → +R2 → +R3). Toda la
+> lógica está validada unitariamente; falta el número real (requiere ROS + bag).
+> Lanzar la ablación: `rosrun acoustic_postprocessing run_ablation.py` (o
+> `--dry-run` para ver los comandos sin ejecutar).
+>
+> **Futuro (R4/R5):** PointNetKL (red que aprende la covarianza con backscatter),
+> representación SVGP del mapa, y descriptor de lugar aprendido (cuando haya un dataset
+> CON cruces de trayectoria).
+
+---
+
 # ✅ Completadas
 
 ### Empaquetado y configuración (catkin)
@@ -21,6 +87,13 @@ Estado: ✅ completada · ⬜ pendiente.
   resto son módulos importados, expuestos vía `catkin_python_setup`). Verificado
   con `cmake` aislado: instala los wrappers en `lib/acoustic_postprocessing`.
   *(2026-06-25)*
+  - ⚠️ **Efecto secundario corregido (2026-06-25)**: el wrapper de catkin ejecuta
+    el script vía `exec()` desde otra ruta, donde `scripts/` no está en `sys.path`
+    → `from utils import *` daba `ModuleNotFoundError`. Solución: el script añade
+    su propio directorio a `sys.path` al inicio
+    (`sys.path.insert(0, dirname(abspath(__file__)))`), válido en ejecución
+    directa y vía wrapper. (A futuro, lo idiomático sería convertir los módulos
+    hermanos en un subpaquete Python con imports relativos — ver §8.)
 - ✅ 🟡 **`find_package` desalineado con `package.xml`** → quitado `std_msgs`
   (no usado ni declarado), añadido `nav_msgs`, añadido `catkin_package()`.
   Confirmado que los scripts solo importan `rospy`/`ros_numpy`. *(2026-06-25)*
@@ -119,13 +192,9 @@ Estado: ✅ completada · ⬜ pendiente.
   `write_ascii=False` con conversión) reduce el fichero ~2× sin pérdida
   perceptible para batimetría. Revisar si las normales hacen falta en el PLY
   final (si no, no exportarlas).
-- ⬜ 🟡 **0 cierres de bucle aceptados en el dataset actual** (943 candidatos
-  rechazados, todos por RANSAC sobre fondo plano, según `loop_stats.csv` /
-  README de presentación). El loop closure hoy no aporta corrección. Investigar:
-  (a) sembrar el ICP con prior INS cuando RANSAC falla (el código menciona que
-  "Fix B" empeoró — documentar el experimento en un report), (b) usar Scan
-  Context sobre intensidad además de Z, (c) bajar dependencia de FPFH en fondo
-  plano. Es la mayor palanca de mejora de exactitud pendiente.
+- ⬜ 🟡 **0 cierres de bucle aceptados** → analizado a fondo: NO es por RANSAC
+  sobre fondo plano. **Ver §9**, la causa raíz es un gate mal formulado y es la
+  mejora #1 del proyecto. (Este ítem queda subsumido por §9.)
 
 ## 6. Rendimiento
 
@@ -174,6 +243,90 @@ Estado: ✅ completada · ⬜ pendiente.
   unas zonas, normal en otras). No es un problema funcional; si se adopta un
   formateador (black/autopep8), hacerlo en un commit aislado para no contaminar
   los diffs de lógica.
+
+## 9. Hallazgos del análisis de resultados (results/metrics)
+
+Derivado de [results/metrics/ANALISIS_RESULTADOS.md](results/metrics/ANALISIS_RESULTADOS.md).
+Tres ejes: (1) desajuste raw↔SLAM, (2) loop closure, (3) intensidad/hybrid.
+
+### 9.1 — Loop closure: gate `icp_ins_ratio` mal formulado  🔴 (MEJORA #1)
+
+**Causa raíz de los 0 cierres.** De 1929 candidatos, 495 pasan RANSAC con
+fitness=1.0 y RMSE≈0.155 m (cierres casi perfectos, revisitas reales de franjas
+del lawnmower) y **los 495 se rechazan por `icp_ins_ratio < 0.40`**. 479/495
+pasarían todos los demás gates. El gate compara `|T_raw|` (marco LOCAL del patch,
+recentrado → ≈0 para un buen cierre) con `ins_distance` (marco GLOBAL, 6–12 m):
+magnitudes incomparables, el ratio tiende a 0 para los MEJORES cierres.
+
+- ✅ 🔴 **HECHO + CORREGIDO (2026-06-25)** Gate de loop closure rediseñado tras
+  un re-lanzamiento fallido. Historia completa:
+  - 1er intento: gate solo-discrepancia (`||T_raw − T_ins_rel|| ≤ 8 m`). Al
+    re-lanzar **colapsó el lawnmower** (corrección 1.3 → 16.8 m, ancho 49 → 15 m):
+    aceptó 321 falsos positivos de **franja paralela** (el ICP las alinea con
+    `|T_raw|≈0` espurio y el optimizador las fusiona). Error de análisis: `|T_raw|≈0`
+    NO es buen cierre, es la firma del falso positivo.
+  - Corregido: **gate de 3 condiciones AND** — (1) `ins_distance ≤
+    MAX_LOOP_REVISIT_INS_DIST` (2.5 m, solo revisitas reales, no franjas
+    paralelas), (2) `ratio ≥ MIN_LOOP_ICP_INS_RATIO` (0.40, restaurado del gate
+    original; rechaza `|T_raw|≈0`), (3) `discrepancia ≤ MAX_LOOP_INS_DISCREPANCY`
+    (8 m, cota superior). Todos configurables por launch. **Validado: acepta
+    0/321 falsos positivos** del run fallido (correcto para lawnmower de pasada
+    única). **Falta re-lanzar** para confirmar que restaura la corrección sana
+    (~1.3 m) + la mejora de 9.2. Ver ANALISIS_RESULTADOS.md §2e/§2f.
+- [ ] 🟡 Re-evaluar **sembrar el ICP con prior INS cuando RANSAC falla** (los
+  1434 `ransac_failed`). Su descarte previo ("Fix B") se hizo con el gate roto
+  activo; repetir el experimento tras 9.1.
+- [ ] 🟡 Subir robustez de RANSAC donde haya estructura (iteraciones / fitness
+  mínimo) o validar el cierre por solape real (inliers en zona común) en vez de
+  por ratio.
+- [ ] 🟡 **Scan Context con intensidad** además de `z` (hoy
+  `np.maximum.at(desc,...,z)`). En fondo plano `z` no discrimina; la textura de
+  intensidad sí → mejor detección de revisitas. (Sinergia con 9.3.)
+
+### 9.2 — Deriva no acotada / gates secuenciales  🟡
+
+La corrección crece con la distancia (corr=0.888), rampa sin retrocesos =
+ausencia de cierres (lo arregla 9.1). Además, con relieve real, el 62 % de pasos
+secuenciales cae a fallback INS pese a fitness≈1.0.
+
+- ✅ 🟡 **HECHO (2026-06-25)** Gates `MAX_SEQ_ICP_TRANSLATION_DEV`/
+  `MAX_SEQ_ICP_YAW_DEV` ahora **modulados por la textura geométrica del par**
+  (`_geometric_texture`, min de source/target). Donde NO hay relieve (textura→0)
+  el gate queda intacto (protección anti-fondo-plano preservada); donde sí hay
+  (textura ≥ `SEQ_GATE_TEXTURE_FULL`=0.30) se relaja hasta
+  `SEQ_GATE_TEXTURE_RELAX`=2.0× (0.5m/15° → 1.0m/30°). Configurable por launch;
+  `relax=1.0` recupera el umbral fijo. Diagnóstico nuevo en JSON/CSV
+  (`geometric_texture`, `icp_translation_dev_m`, `icp_direction_dev_deg`, y los
+  umbrales efectivos). **Falta re-lanzar** para medir la subida real de la tasa
+  de aceptación secuencial (hoy 38%).
+- ✅ 🟢 **HECHO (2026-06-25)** Documentado en código (bloque de restauración
+  vertical) que la corrección Z es 0 por diseño (Z=INS) y qué hacer si el INS de
+  profundidad no fuera fiable (conservar la Z optimizada en vez de la del INS).
+
+### 9.3 — Proyección de intensidad  🟡 / 🟢
+
+La intensidad proyectada ya es buena (entropía 3.67/4.32 bits, 0.8 % sin
+intensidad, sin saturación). En el dataset analizado el fondo tiene relieve
+(textura 0.487 ≫ umbral 0.08) → el hybrid usa geometría casi siempre y la
+intensidad apenas interviene. Las mejoras rinden **en fondo plano**:
+
+- [ ] 🟡 **Corrección por rango/TVG** además del ángulo (AVG actual). El
+  backscatter decae con el rango oblicuo (propagación+absorción); normalizar por
+  un perfil ganancia-vs-rango quita gradientes radiales espurios.
+- [ ] 🟡 **Ecualización local (CLAHE)** en vez de normalización global por
+  percentiles 2–98, para realzar micro-textura del sedimento (la que da gradiente
+  XY al Colored ICP en fondo liso).
+- [ ] 🟢 AVG con ángulo de incidencia **corregido por pose** (roll/pitch reales),
+  en vez de asumir fondo horizontal en `arctan2(across, depth)`. (Relacionado con
+  §4 sobre el eje de intensidad.)
+- [ ] 🟢 Filtrar outliers de backscatter (specular / nadir bright spot) antes del
+  percentil para usar mejor el rango dinámico.
+
+### 9.4 — Coherencia de narrativa  🟢
+
+- [ ] 🟢 Unificar "fondo plano" (README presentación / CLAUDE.md) vs "con relieve"
+  (dataset analizado). Aclarar qué dataset se presenta; el run de `results/` actual
+  NO coincide con el del README de presentación (647 vs 1456 nodos).
 
 ---
 

@@ -78,14 +78,14 @@ def compute_scan_context(
 # =============================================================================
 # SCAN CONTEXT DISTANCE
 # =============================================================================
-# Distancia basada en similitud coseno entre descriptores aplanados.
-# Incluye búsqueda de alineación rotacional por columnas (sector shift)
-# para ser invariante a la orientación del vehículo.
+# Distance based on cosine similarity between flattened descriptors.
+# Includes a rotational alignment search by columns (sector shift)
+# to be invariant to vehicle orientation.
 # =============================================================================
 
 def scan_context_distance(desc1, desc2, rk1_fft=None, rk2_fft=None):
 
-    # Ring key: media de cada columna → vector 1D compacto para preselección
+    # Ring key: mean of each column → compact 1D vector for preselection
     rk1 = desc1.mean(axis=0)
     rk2 = desc2.mean(axis=0)
 
@@ -95,11 +95,11 @@ def scan_context_distance(desc1, desc2, rk1_fft=None, rk2_fft=None):
     if n1 < 1e-6 or n2 < 1e-6:
         return 1.0
 
-    # Encontrar el desplazamiento de columna óptimo vía correlación circular
-    # Equivalente eficiente a probar todos los shifts pero en O(S log S).
-    # PERF: la FFT del ring-key es invariante por patch; si el llamante la pasa
-    # precalculada (rk1_fft, rk2_fft) se evita recalcular la MISMA FFT en cada
-    # comparación. El resultado (la correlación) es idéntico.
+    # Find the optimal column shift via circular correlation
+    # Efficient equivalent to trying all shifts but in O(S log S).
+    # PERF: the ring-key FFT is invariant per patch; if the caller passes it
+    # precomputed (rk1_fft, rk2_fft) we avoid recomputing the SAME FFT on each
+    # comparison. The result (the correlation) is identical.
     if rk1_fft is None:
         rk1_fft = np.fft.fft(rk1)
     if rk2_fft is None:
@@ -111,7 +111,7 @@ def scan_context_distance(desc1, desc2, rk1_fft=None, rk2_fft=None):
 
     best_shift = int(np.argmax(corr))
 
-    # Evaluar distancia coseno con el shift óptimo
+    # Evaluate cosine distance with the optimal shift
     desc2_shifted = np.roll(desc2, best_shift, axis=1)
 
     d1 = desc1.flatten()
@@ -131,16 +131,15 @@ def scan_context_distance(desc1, desc2, rk1_fft=None, rk2_fft=None):
 # =============================================================================
 # SCAN CONTEXT MANAGER
 # =============================================================================
-# Gestiona la base de datos de descriptores y la búsqueda de candidatos
-# a cierre de bucle.
+# Manages the descriptor database and the search for loop-closure candidates.
 #
-# Interfaz esperada por multibeam_slam.py:
+# Interface expected by multibeam_slam.py:
 #
 #   manager = ScanContextManager(min_temporal_gap=25)
 #   manager.add_descriptor(pcd)               # Open3D PointCloud
 #   candidates = manager.detect_loop_candidates(
 #       idx, top_k=5, threshold=0.22
-#   )  → lista de (cand_idx, score) ordenada por score ascendente
+#   )  → list of (cand_idx, score) sorted by ascending score
 #
 # =============================================================================
 
@@ -153,28 +152,28 @@ class ScanContextManager:
             max_radius=40.0,
             min_temporal_gap=25):
 
-        # Parámetros del descriptor
+        # Descriptor parameters
         self.num_rings = num_rings
         self.num_sectors = num_sectors
         self.max_radius = max_radius
 
-        # Mínima separación temporal (en índices) para considerar un
-        # candidato como cierre de bucle y no como arista secuencial
+        # Minimum temporal separation (in indices) to consider a
+        # candidate a loop closure and not a sequential edge
         self.min_temporal_gap = min_temporal_gap
 
-        # Base de datos de descriptores: lista de arrays (num_rings, num_sectors)
+        # Descriptor database: list of (num_rings, num_sectors) arrays
         self.descriptors = []
 
-        # Ring keys precalculadas para búsqueda rápida por columnas
+        # Precomputed ring keys for fast column search
         self._ring_keys = []
 
-        # PERF: FFT del ring-key precalculada por patch. La correlación circular
-        # de scan_context_distance la reutiliza en cada comparación en vez de
-        # recalcular dos FFT por par (mismo resultado, mucho menos cómputo).
+        # PERF: ring-key FFT precomputed per patch. The circular correlation in
+        # scan_context_distance reuses it on each comparison instead of
+        # recomputing two FFTs per pair (same result, much less compute).
         self._ring_key_ffts = []
 
-        # Posiciones INS (norte, este) por patch, para el pre-filtro espacial.
-        # Opcional: si no se proporcionan, la búsqueda recae al O(N²) clásico.
+        # INS positions (north, east) per patch, for the spatial pre-filter.
+        # Optional: if not provided, the search falls back to the classic O(N²).
         self._ins_xy = []
         self._kdtree = None
 
@@ -184,11 +183,11 @@ class ScanContextManager:
 
     def add_descriptor(self, pcd, ins_xy=None):
         """
-        Calcula el Scan Context de un Open3D PointCloud y lo añade a la BD.
+        Compute the Scan Context of an Open3D PointCloud and add it to the DB.
 
-        ins_xy: (norte, este) opcional de la pose INS del patch. Si se aporta
-        para todos los patches, detect_loop_candidates pre-filtra por proximidad
-        espacial con un KD-tree (de O(N²) a O(N log N + N·vecinos)).
+        ins_xy: optional (north, east) of the patch's INS pose. If provided for
+        all patches, detect_loop_candidates pre-filters by spatial proximity
+        with a KD-tree (from O(N²) to O(N log N + N·neighbors)).
         """
 
         points = np.asarray(pcd.points)
@@ -202,7 +201,7 @@ class ScanContextManager:
 
         self.descriptors.append(desc)
 
-        # Ring key: media por columna (sector) → vector 1D para preselección
+        # Ring key: mean per column (sector) → 1D vector for preselection
         ring_key = desc.mean(axis=0)
         self._ring_keys.append(ring_key)
         self._ring_key_ffts.append(np.fft.fft(ring_key))
@@ -212,7 +211,7 @@ class ScanContextManager:
                 np.asarray(ins_xy, dtype=float)
             )
 
-        # El KD-tree se invalida; se reconstruye perezosamente al buscar.
+        # The KD-tree is invalidated; rebuilt lazily on search.
         self._kdtree = None
 
     # -------------------------------------------------------------------------
@@ -226,16 +225,16 @@ class ScanContextManager:
             threshold=0.22,
             max_ins_distance=None):
         """
-        Busca los top_k candidatos más similares al descriptor query_idx
-        que estén separados al menos min_temporal_gap posiciones.
+        Search the top_k candidates most similar to descriptor query_idx
+        that are separated by at least min_temporal_gap positions.
 
-        Si hay posiciones INS para todos los patches y se pasa max_ins_distance,
-        solo se evalúan los descriptores de patches espacialmente cercanos
-        (pre-filtro con KD-tree). Esto evita ~1456² comparaciones con FFT,
-        que es el principal cuello de botella del loop closure.
+        If there are INS positions for all patches and max_ins_distance is
+        passed, only the descriptors of spatially nearby patches are evaluated
+        (KD-tree pre-filter). This avoids ~1456² FFT comparisons, which is the
+        main loop-closure bottleneck.
 
-        Retorna lista de tuplas (cand_idx, distancia) ordenada por distancia
-        ascendente, filtrada por el umbral threshold.
+        Returns a list of (cand_idx, distance) tuples sorted by ascending
+        distance, filtered by the threshold.
         """
 
         if query_idx >= len(self.descriptors):
@@ -244,7 +243,7 @@ class ScanContextManager:
         query_desc = self.descriptors[query_idx]
         query_fft = self._ring_key_ffts[query_idx]
 
-        # -- Conjunto de candidatos a evaluar --------------------------------
+        # -- Candidate set to evaluate ---------------------------------------
         use_spatial = (
             _HAS_KDTREE
             and max_ins_distance is not None
@@ -256,7 +255,7 @@ class ScanContextManager:
             if self._kdtree is None:
                 self._kdtree = cKDTree(np.vstack(self._ins_xy))
 
-            # Vecinos espaciales del query dentro de max_ins_distance.
+            # Spatial neighbors of the query within max_ins_distance.
             cand_indices = self._kdtree.query_ball_point(
                 self._ins_xy[query_idx],
                 r=max_ins_distance
@@ -270,7 +269,7 @@ class ScanContextManager:
 
         for i in cand_indices:
 
-            # Excluir vecinos temporales próximos
+            # Exclude nearby temporal neighbors
             if abs(i - query_idx) < self.min_temporal_gap:
                 continue
 
@@ -286,7 +285,7 @@ class ScanContextManager:
         if len(distances) == 0:
             return []
 
-        # Ordenar por distancia ascendente y filtrar por umbral
+        # Sort by ascending distance and filter by threshold
         distances.sort(key=lambda x: x[1])
 
         candidates = [

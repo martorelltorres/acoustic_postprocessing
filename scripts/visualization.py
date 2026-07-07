@@ -178,7 +178,7 @@ def create_loop_lines(
 
 
 # =============================================================================
-# RECENT CLOUDS LAYER  (Opción C / VIS-002)
+# RECENT CLOUDS LAYER  (Option C / VIS-002)
 # =============================================================================
 
 def build_recent_clouds(
@@ -187,10 +187,10 @@ def build_recent_clouds(
         window=15,
         voxel=0.4):
     """
-    Construye una única nube con los últimos `window` patches transformados por
-    su pose actual del grafo. Cada patch se tiñe con un gradiente temporal (de
-    azul=más antiguo a rojo=más reciente) para que se vea el orden y dónde
-    podría haber un desalineamiento. `voxel` submuestrea por rendimiento.
+    Builds a single cloud with the last `window` patches transformed by
+    their current graph pose. Each patch is tinted with a temporal gradient (from
+    blue=oldest to red=most recent) so the order and where a misalignment
+    might be are visible. `voxel` subsamples for performance.
     """
 
     n = min(len(patches), len(pose_graph.nodes))
@@ -211,7 +211,7 @@ def build_recent_clouds(
         cloud = copy.deepcopy(patch.pcd)
         cloud.transform(pose_graph.nodes[idx].pose)
 
-        # Gradiente temporal azul→rojo según antigüedad dentro de la ventana.
+        # Blue→red temporal gradient by age within the window.
         frac = k / span
         color = [frac, 0.15, 1.0 - frac]
         cloud.paint_uniform_color(color)
@@ -247,11 +247,11 @@ class PoseGraphMonitor:
         self.min_zoom = min_zoom
         self.overview_margin = overview_margin
 
-        # --- Capa de nubes de puntos (Opción C / VIS-002) ---
-        # Muestra las nubes de los últimos `cloud_window` patches transformadas
-        # por sus poses actuales, para ver el mapa construyéndose y detectar
-        # incoherencias de alineamiento en vivo. `cloud_voxel` submuestrea para
-        # que el render no ahogue el bucle (None = sin submuestreo).
+        # --- Point cloud layer (Option C / VIS-002) ---
+        # Shows the clouds of the last `cloud_window` patches transformed
+        # by their current poses, to see the map being built and detect
+        # alignment inconsistencies live. `cloud_voxel` subsamples so
+        # the render does not choke the loop (None = no subsampling).
         self.show_clouds = show_clouds
         self.cloud_window = int(cloud_window)
         self.cloud_voxel = cloud_voxel
@@ -311,9 +311,9 @@ class PoseGraphMonitor:
             color=[1, 0, 0]
         )
 
-        # Capa de nubes de los últimos N patches (si se aportan patches y está
-        # activada). Permite ver el mapa construyéndose y detectar
-        # desalineamientos en vivo.
+        # Cloud layer of the last N patches (if patches are provided and it is
+        # enabled). Lets you see the map being built and detect
+        # misalignments live.
         recent_clouds = None
         if self.show_clouds and patches is not None:
             recent_clouds = build_recent_clouds(
@@ -456,22 +456,22 @@ class PoseGraphMonitor:
         # =========================================================
         # GLOBAL OVERVIEW CAMERA
         # =========================================================
-        # Mantiene una vista cenital de toda la trayectoria acumulada.
-        # El zoom queda intencionadamente alejado para observar la
-        # evolución global, no solo la zona local del último nodo.
+        # Keeps a top-down view of the entire accumulated trajectory.
+        # The zoom is intentionally kept far out to observe the
+        # global evolution, not just the local zone of the last node.
         # =========================================================
 
         if len(trajectory) >= 2:
 
             ctr = self.vis.get_view_control()
 
-            # Centro de la trayectoria completa
+            # Center of the full trajectory
             traj_center = trajectory.mean(axis=0)
 
-            # Apuntar al centro de la trayectoria
+            # Aim at the center of the trajectory
             ctr.set_lookat(traj_center.tolist())
 
-            # Vista cenital (desde arriba, eje Z)
+            # Top-down view (from above, Z axis)
             ctr.set_up([0, 1, 0])
             ctr.set_front([0, 0, 1])
 

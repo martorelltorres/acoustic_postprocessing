@@ -7,15 +7,15 @@ from collections import OrderedDict
 
 
 # -----------------------------------------------------------------------------
-# PERF: CACHÉ DE FPFH POR NUBE
+# PERF: FPFH CACHE PER CLOUD
 # -----------------------------------------------------------------------------
-# En el loop closure cada patch participa como source o target en MUCHOS pares
-# candidatos, y preprocess_pointcloud recalcula downsample + normales + FPFH
-# (lo más caro: max_nn=100) sobre la MISMA nube cada vez. El FPFH de un patch es
-# invariante (no depende del par), así que se cachea por (id(pcd), voxel) y se
-# reutiliza. El RANSAC recibe exactamente las mismas features → resultado
-# idéntico, con una fracción del cómputo. La clave id(pcd) es estable porque los
-# patches son objetos persistentes durante todo el run.
+# In loop closure each patch takes part as source or target in MANY candidate
+# pairs, and preprocess_pointcloud recomputes downsample + normals + FPFH (the
+# most expensive: max_nn=100) on the SAME cloud each time. A patch's FPFH is
+# invariant (does not depend on the pair), so it is cached by (id(pcd), voxel)
+# and reused. RANSAC receives exactly the same features → identical result,
+# with a fraction of the compute. The id(pcd) key is stable because patches are
+# persistent objects for the whole run.
 # -----------------------------------------------------------------------------
 
 _FPFH_CACHE = OrderedDict()
@@ -23,7 +23,7 @@ _FPFH_CACHE_MAX = 4096
 
 
 def clear_fpfh_cache():
-    """Limpia el caché de FPFH (llamar entre runs si procede)."""
+    """Clear the FPFH cache (call between runs if appropriate)."""
     _FPFH_CACHE.clear()
 
 
@@ -76,13 +76,13 @@ def execute_global_registration(
         source,
         target,
         voxel_size,
-        min_fitness=0.25):          # umbral mínimo de aceptación
+        min_fitness=0.25):          # minimum acceptance threshold
 
     source_down, source_fpfh = preprocess_pointcloud(source, voxel_size)
     target_down, target_fpfh = preprocess_pointcloud(target, voxel_size)
 
-    distance_threshold = voxel_size * 1.5   # antes: * 2.0
-                                             # más estricto reduce falsos positivos
+    distance_threshold = voxel_size * 1.5   # was: * 2.0
+                                             # stricter reduces false positives
 
     result = (
         o3d.pipelines.registration.
@@ -102,14 +102,14 @@ def execute_global_registration(
                 TransformationEstimationPointToPoint(False)
             ),
 
-            ransac_n=3,             # antes: 4
-                                    # 3 puntos definen un plano: mínimo necesario
-                                    # para transformación 3D, más eficiente
+            ransac_n=3,             # was: 4
+                                    # 3 points define a plane: minimum needed
+                                    # for 3D transform, more efficient
 
             checkers=[
                 o3d.pipelines.registration.
                 CorrespondenceCheckerBasedOnEdgeLength(
-                    0.8             # antes: 0.9 — menos restrictivo
+                    0.8             # was: 0.9 — less restrictive
                 ),
                 o3d.pipelines.registration.
                 CorrespondenceCheckerBasedOnDistance(
@@ -120,12 +120,12 @@ def execute_global_registration(
             criteria=(
                 o3d.pipelines.registration.
                 RANSACConvergenceCriteria(
-                    100000,         # PERF: bajado de 4.000.000.
-                                    # En fondo plano FPFH no discrimina y RANSAC
-                                    # falla casi siempre (ver report_ransac.md),
-                                    # así que 4M iteraciones eran cómputo
-                                    # malgastado. 100k basta donde sí hay
-                                    # estructura y acelera mucho donde no.
+                    100000,         # PERF: lowered from 4,000,000.
+                                    # On flat bottom FPFH does not discriminate
+                                    # and RANSAC fails almost always (see
+                                    # report_ransac.md), so 4M iterations were
+                                    # wasted compute. 100k is enough where there
+                                    # is structure and is much faster where not.
                     0.999
                 )
             )

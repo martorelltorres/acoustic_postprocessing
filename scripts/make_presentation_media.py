@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-GENERADOR DE MATERIAL AUDIOVISUAL PARA PRESENTACIÓN
+PRESENTATION AUDIOVISUAL MEDIA GENERATOR
 ===============================================================================
-Produce animaciones (GIF + MP4) que ilustran las tres ideas clave del pipeline
-acoustic_postprocessing usando los DATOS REALES de results/:
+Produces animations (GIF + MP4) illustrating the three key ideas of the
+acoustic_postprocessing pipeline using the REAL DATA from results/:
 
-  1. anim_patches.(gif|mp4)   — construcción del mapa patch a patch a lo largo
-                                 de la trayectoria (ventana deslizante de barridos
-                                 → nube local), sobre la trayectoria SLAM real.
-  2. anim_registration.(gif|mp4) — registro de dos nubes: source desalineada
-                                 (prior INS) → ICP iterando → alineada al target.
-                                 Usa dos patches reales recortados del mapa.
-  3. anim_loop_closure.(gif|mp4) — cómo se evalúan candidatos a cierre de bucle
-                                 sobre el lawnmower real: gate de proximidad INS,
-                                 y por qué se rechazan los falsos positivos entre
-                                 franjas paralelas (caso real: 0 aceptados).
-  4. anim_global_optimization.(gif|mp4) — el pose graph: nodos (patches) unidos
-                                 por aristas de ICP secuencial, anclados en el
-                                 nodo de referencia 0; el optimizador global
-                                 (Levenberg-Marquardt) relaja el grafo y reparte
-                                 el error de deriva acumulado, llevando los nodos
-                                 desde la trayectoria bruta (INS) hacia la
-                                 configuración SLAM consistente.
+  1. anim_patches.(gif|mp4)   — map construction patch by patch along the
+                                 trajectory (sliding window of scans → local
+                                 cloud), over the real SLAM trajectory.
+  2. anim_registration.(gif|mp4) — registration of two clouds: misaligned source
+                                 (INS prior) → ICP iterating → aligned to target.
+                                 Uses two real patches cropped from the map.
+  3. anim_loop_closure.(gif|mp4) — how loop-closure candidates are evaluated
+                                 over the real lawnmower: INS proximity gate,
+                                 and why false positives between parallel strips
+                                 are rejected (real case: 0 accepted).
+  4. anim_global_optimization.(gif|mp4) — the pose graph: nodes (patches) joined
+                                 by sequential ICP edges, anchored at reference
+                                 node 0; the global optimizer
+                                 (Levenberg-Marquardt) relaxes the graph and
+                                 redistributes the accumulated drift error,
+                                 moving the nodes from the raw (INS) trajectory
+                                 toward the consistent SLAM configuration.
 
-No requiere ROS ni Open3D para correr: lee .npy y .ply (este último con plyfile
-o, si no está, con un parser mínimo). Solo necesita numpy + matplotlib (+ffmpeg
-para el MP4, opcional).
+Requires neither ROS nor Open3D to run: reads .npy and .ply (the latter with
+plyfile or, if absent, a minimal parser). Only needs numpy + matplotlib (+ffmpeg
+for the MP4, optional).
 
-Uso:
+Usage:
     python3 scripts/make_presentation_media.py
-Salida:
+Output:
     results/presentation/*.gif  *.mp4
 ===============================================================================
 """
@@ -54,17 +54,17 @@ os.makedirs(OUT, exist_ok=True)
 FPS = 20
 DPI = 110
 
-# Paleta coherente con la documentación.
-C_RAW = "#4a90d9"      # navegación bruta
+# Palette consistent with the documentation.
+C_RAW = "#4a90d9"      # raw navigation
 C_SLAM = "#e0245e"     # SLAM
-C_SRC = "#e67e22"      # source (a alinear)
-C_TGT = "#2ecc71"      # target (referencia)
-C_BG = "#0e1726"       # fondo oscuro tipo "monitor"
+C_SRC = "#e67e22"      # source (to align)
+C_TGT = "#2ecc71"      # target (reference)
+C_BG = "#0e1726"       # dark "monitor"-style background
 C_FG = "#dfe6f0"
 
 
 # -----------------------------------------------------------------------------
-# CARGA DE DATOS
+# DATA LOADING
 # -----------------------------------------------------------------------------
 
 def load_trajectories():
@@ -74,8 +74,8 @@ def load_trajectories():
 
 
 def _read_ply_xyz(path, max_points=120000):
-    """Lee XYZ (+ color gris si existe) de un PLY binario/ascii sin dependencias.
-    Devuelve (xyz, intensity[0..1] o None)."""
+    """Reads XYZ (+ gray color if present) from a binary/ascii PLY without dependencies.
+    Returns (xyz, intensity[0..1] or None)."""
     try:
         from plyfile import PlyData
         ply = PlyData.read(path)
@@ -88,11 +88,11 @@ def _read_ply_xyz(path, max_points=120000):
     except Exception:
         pass
 
-    # Parser mínimo de PLY (cabecera ascii + cuerpo ascii o binary_little_endian).
+    # Minimal PLY parser (ascii header + ascii or binary_little_endian body).
     with open(path, "rb") as f:
         magic = f.readline().strip()
         if magic != b"ply":
-            raise ValueError("No es PLY")
+            raise ValueError("Not a PLY")
         fmt = None
         n = 0
         props = []
@@ -139,7 +139,7 @@ def _subsample(xyz, inten, max_points):
 
 
 # =============================================================================
-# 1. CONSTRUCCIÓN DE PATCHES  — mapa creciendo a lo largo de la trayectoria
+# 1. PATCH CONSTRUCTION  — map growing along the trajectory
 # =============================================================================
 
 def anim_patches(slam, mapxyz, mapinten, save_base):
@@ -262,7 +262,7 @@ def anim_patches(slam, mapxyz, mapinten, save_base):
 
 
 # =============================================================================
-# 2. REGISTRO DE POINT CLOUDS — source desalineada → ICP → alineada
+# 2. POINT CLOUD REGISTRATION — misaligned source → ICP → aligned
 # =============================================================================
 
 def _patch_from_map(xyz, center_xy, radius=10.0):
@@ -271,17 +271,17 @@ def _patch_from_map(xyz, center_xy, radius=10.0):
 
 
 def anim_registration(slam, mapxyz, mapinten, save_base):
-    """Toma dos recortes reales del mapa (dos patches solapados) y anima el ICP:
-    el source parte de una pose desalineada (error de navegación) y converge al
-    target iteración a iteración."""
+    """Takes two real crops from the map (two overlapping patches) and animates the ICP:
+    the source starts from a misaligned pose (navigation error) and converges to the
+    target iteration by iteration."""
 
-    # Dos patches consecutivos observan EL MISMO trozo de fondo con ~80% de
-    # solape. Para una animación pedagógica de registro tomamos un único recorte
-    # real del mapa (el fondo común) y construimos source y target como dos
-    # observaciones de ese mismo fondo: cada una ve una mitad solapada distinta
-    # (como patches consecutivos) + ruido acústico independiente. Al converger el
-    # ICP, source y target quedan SUPERPUESTOS sobre la zona común, que es la
-    # lectura correcta del registro.
+    # Two consecutive patches observe THE SAME piece of seafloor with ~80%
+    # overlap. For a pedagogical registration animation we take a single real
+    # crop from the map (the common seafloor) and build source and target as two
+    # observations of that same seafloor: each sees a different overlapping half
+    # (like consecutive patches) + independent acoustic noise. When the ICP
+    # converges, source and target end up SUPERIMPOSED over the common area, which
+    # is the correct reading of the registration.
     i0 = len(slam) // 3
     c = np.array([slam[i0, 1], slam[i0, 0]])     # (E, N)
     base = _patch_from_map(mapxyz, c, radius=13)
@@ -290,14 +290,14 @@ def anim_registration(slam, mapxyz, mapinten, save_base):
         base = _patch_from_map(mapxyz, c, radius=14)
 
     cen = base[:, :2].mean(axis=0)
-    P = base[:, :2] - cen                         # fondo común centrado
+    P = base[:, :2] - cen                         # centered common seafloor
 
     rng = np.random.default_rng(2)
-    # Patch i-1 (target): mitad con x<+4. Patch i (source): mitad con x>-4.
-    # La franja |x|<4 es la zona de SOLAPE que el ICP debe casar.
+    # Patch i-1 (target): half with x<+4. Patch i (source): half with x>-4.
+    # The strip |x|<4 is the OVERLAP area the ICP must match.
     T = P[P[:, 0] < 4.0]
     S0 = P[P[:, 0] > -4.0].copy()
-    # Ruido acústico independiente en cada nube (MBES es ruidoso).
+    # Independent acoustic noise in each cloud (MBES is noisy).
     T = T + rng.normal(0, 0.12, T.shape)
     S0 = S0 + rng.normal(0, 0.12, S0.shape)
     if len(T) > 2200:
@@ -305,13 +305,13 @@ def anim_registration(slam, mapxyz, mapinten, save_base):
     if len(S0) > 2200:
         S0 = S0[rng.choice(len(S0), 2200, replace=False)]
 
-    # Desalineación inicial (error tipo deriva INS): rotación + traslación.
+    # Initial misalignment (INS-drift-type error): rotation + translation.
     ang0 = np.deg2rad(16.0)
     R0 = np.array([[np.cos(ang0), -np.sin(ang0)], [np.sin(ang0), np.cos(ang0)]])
     t0 = np.array([4.5, -3.2])
     S_disp = S0 @ R0.T + t0
 
-    # Interpolación suave hacia la pose alineada (identidad sobre el solape).
+    # Smooth interpolation toward the aligned pose (identity over the overlap).
     n_iter = 26
     fig, ax = plt.subplots(figsize=(8, 7), facecolor=C_BG)
     ax.set_facecolor(C_BG)
@@ -334,7 +334,7 @@ def anim_registration(slam, mapxyz, mapinten, save_base):
     for txt in leg.get_texts():
         txt.set_color(C_FG)
 
-    # Líneas de correspondencia (algunas) que se acortan al converger.
+    # Correspondence lines (some) that shorten as it converges.
     corr_lc = LineCollection([], colors="#8899aa", linewidths=0.4, alpha=0.5)
     ax.add_collection(corr_lc)
 
@@ -343,7 +343,7 @@ def anim_registration(slam, mapxyz, mapinten, save_base):
     total = hold_start + n_iter + hold_end
 
     def current_S(k):
-        # k en [0, n_iter]: easing cúbico de S_disp → S0.
+        # k in [0, n_iter]: cubic easing from S_disp → S0.
         a = np.clip(k / n_iter, 0, 1)
         a = a * a * (3 - 2 * a)
         ang = ang0 * (1 - a)
@@ -351,7 +351,7 @@ def anim_registration(slam, mapxyz, mapinten, save_base):
         t = t0 * (1 - a)
         return S0 @ R.T + t, a
 
-    # Vecinos para dibujar correspondencias.
+    # Neighbors to draw correspondences.
     from numpy.linalg import norm
     def corr_segments(S):
         m = min(40, len(S))
@@ -388,14 +388,14 @@ def anim_registration(slam, mapxyz, mapinten, save_base):
 
 
 # =============================================================================
-# 3. CIERRE DE BUCLE — evaluación de candidatos sobre el lawnmower real
+# 3. LOOP CLOSURE — candidate evaluation over the real lawnmower
 # =============================================================================
 
 def anim_loop_closure(raw, slam, save_base):
-    """Sobre la trayectoria real (lawnmower), muestra cómo un patch consulta
-    candidatos de cierre: gate de proximidad INS (radio), y por qué se rechazan
-    los emparejamientos entre franjas paralelas de fondo plano (RANSAC falla →
-    0 cierres aceptados en este dataset)."""
+    """Over the real trajectory (lawnmower), shows how a patch queries closure
+    candidates: INS proximity gate (radius), and why matches between parallel
+    flat-seafloor strips are rejected (RANSAC fails → 0 closures accepted in
+    this dataset)."""
 
     E = slam[:, 1]
     N = slam[:, 0]
@@ -431,8 +431,8 @@ def anim_loop_closure(raw, slam, save_base):
     for txt in leg.get_texts():
         txt.set_color(C_FG)
 
-    # Query recorre puntos a lo largo de la trayectoria; en cada uno buscamos
-    # vecinos espaciales (otra franja) dentro del radio pero lejanos en tiempo.
+    # Query walks points along the trajectory; at each one we look for spatial
+    # neighbors (another strip) within the radius but distant in time.
     qs = list(range(60, n - 60, 22))
 
     def neighbors(i):
@@ -466,41 +466,41 @@ def anim_loop_closure(raw, slam, save_base):
 
 
 # =============================================================================
-# 4. OPTIMIZACIÓN GLOBAL DEL POSE GRAPH — Levenberg-Marquardt
+# 4. POSE GRAPH GLOBAL OPTIMIZATION — Levenberg-Marquardt
 # =============================================================================
 
 def anim_global_optimization(raw, slam, save_base):
-    """Demuestra el funcionamiento de la optimización global del pose graph.
+    """Demonstrates how the pose graph global optimization works.
 
-    Espejo de lo que hace `o3d.pipelines.registration.global_optimization`:
-    cada patch es un NODO; las aristas de ICP secuencial conectan nodos
-    consecutivos; el nodo 0 es el de referencia (anclado, reference_node=0).
-    El optimizador (Levenberg-Marquardt) ajusta TODAS las poses a la vez para
-    minimizar el error de las aristas, repartiendo la deriva acumulada del INS a
-    lo largo de toda la trayectoria en lugar de dejarla concentrada al final.
+    Mirrors what `o3d.pipelines.registration.global_optimization` does:
+    each patch is a NODE; sequential ICP edges connect consecutive nodes;
+    node 0 is the reference (anchored, reference_node=0).
+    The optimizer (Levenberg-Marquardt) adjusts ALL poses at once to
+    minimize the edge error, redistributing the accumulated INS drift along
+    the whole trajectory instead of leaving it concentrated at the end.
 
-    Visualmente partimos del grafo SOBRE la navegación bruta (con su deriva) y lo
-    relajamos hacia la configuración SLAM optimizada (real). Mostramos:
-      · los nodos del grafo y sus aristas secuenciales,
-      · el nodo de referencia 0 anclado (no se mueve),
-      · los residuos de las aristas encogiéndose iteración a iteración,
-      · cómo el error global cae al converger.
+    Visually we start from the graph OVER the raw navigation (with its drift) and
+    relax it toward the optimized (real) SLAM configuration. We show:
+      · the graph nodes and their sequential edges,
+      · the anchored reference node 0 (does not move),
+      · the edge residuals shrinking iteration by iteration,
+      · how the global error drops on convergence.
     """
 
     Eraw, Nraw = raw[:, 1], raw[:, 0]
     Eslam, Nslam = slam[:, 1], slam[:, 0]
     n = len(slam)
 
-    # Submuestreo de nodos: un pose graph mostrable (decenas de nodos),
-    # no miles. Mantenemos el nodo 0 (referencia) y el último.
+    # Node subsampling: a displayable pose graph (tens of nodes),
+    # not thousands. We keep node 0 (reference) and the last one.
     n_nodes = min(48, n)
     node_idx = np.linspace(0, n - 1, n_nodes).astype(int)
 
-    P_raw = np.column_stack([Eraw[node_idx], Nraw[node_idx]])    # grafo inicial
-    P_opt = np.column_stack([Eslam[node_idx], Nslam[node_idx]])  # grafo final
+    P_raw = np.column_stack([Eraw[node_idx], Nraw[node_idx]])    # initial graph
+    P_opt = np.column_stack([Eslam[node_idx], Nslam[node_idx]])  # final graph
 
-    # Anclamos el grafo en el nodo de referencia 0: alineamos ambos grafos para
-    # que el nodo 0 coincida (reference_node=0 no se mueve en la optimización).
+    # We anchor the graph at reference node 0: align both graphs so that
+    # node 0 coincides (reference_node=0 does not move in the optimization).
     P_raw = P_raw - P_raw[0] + P_opt[0]
 
     fig, ax = plt.subplots(figsize=(8, 7), facecolor=C_BG)
@@ -518,15 +518,15 @@ def anim_global_optimization(raw, slam, save_base):
         s.set_color("#33415c")
     title = ax.set_title("", color=C_FG, fontsize=12, pad=12)
 
-    # Referencia tenue de la solución optimizada (objetivo).
+    # Faint reference of the optimized solution (target).
     ax.plot(P_opt[:, 0], P_opt[:, 1], color="#33506e", lw=1.0, ls=":",
             alpha=0.6, zorder=1)
 
-    # Aristas secuenciales del grafo (LineCollection que se actualiza).
+    # Sequential graph edges (LineCollection that updates).
     edge_lc = LineCollection([], colors=C_SRC, linewidths=1.4, alpha=0.85,
                              zorder=2)
     ax.add_collection(edge_lc)
-    # Residuos: cuánto se desvía cada nodo de su pose final (se encoge).
+    # Residuals: how far each node deviates from its final pose (shrinks).
     resid_lc = LineCollection([], colors="#ff5d5d", linewidths=0.9,
                               alpha=0.7, zorder=3)
     ax.add_collection(resid_lc)
@@ -546,8 +546,8 @@ def anim_global_optimization(raw, slam, save_base):
     total = hold_start + n_iter + hold_end
 
     def nodes_at(k):
-        # k en [0, n_iter]: relajación con easing cúbico de P_raw → P_opt.
-        # El nodo 0 (referencia) permanece fijo por construcción (P_raw[0]==P_opt[0]).
+        # k in [0, n_iter]: relaxation with cubic easing from P_raw → P_opt.
+        # Node 0 (reference) stays fixed by construction (P_raw[0]==P_opt[0]).
         a = np.clip(k / n_iter, 0, 1)
         a = a * a * (3 - 2 * a)
         return P_raw + (P_opt - P_raw) * a, a
@@ -565,7 +565,7 @@ def anim_global_optimization(raw, slam, save_base):
         edge_lc.set_segments([[P[i], P[i + 1]] for i in range(len(P) - 1)])
         resid_lc.set_segments([[P[i], P_opt[i]] for i in range(len(P))])
 
-        # Error global = residuo medio de los nodos respecto a la solución.
+        # Global error = mean node residual relative to the solution.
         err = float(np.mean(np.linalg.norm(P - P_opt, axis=1)))
 
         if f < hold_start:
@@ -586,12 +586,12 @@ def anim_global_optimization(raw, slam, save_base):
 
 
 # =============================================================================
-# 5. TRAYECTORIA RAW → SLAM (bonus, muy vendible)
+# 5. RAW → SLAM TRAJECTORY (bonus, very marketable)
 # =============================================================================
 
 def anim_trajectory(raw, slam, save_base):
-    """Dibuja la trayectoria bruta y luego 'tira' de ella hacia la corregida
-    por SLAM, mostrando la magnitud de la corrección."""
+    """Draws the raw trajectory and then 'pulls' it toward the SLAM-corrected
+    one, showing the magnitude of the correction."""
     Eraw, Nraw = raw[:, 1], raw[:, 0]
     Eslam, Nslam = slam[:, 1], slam[:, 0]
     n = len(slam)
@@ -652,7 +652,7 @@ def anim_trajectory(raw, slam, save_base):
 
 
 # -----------------------------------------------------------------------------
-# GUARDADO (GIF siempre, MP4 si hay ffmpeg)
+# SAVING (GIF always, MP4 if ffmpeg is available)
 # -----------------------------------------------------------------------------
 
 def _save(anim, fig, base, frames):
@@ -666,48 +666,48 @@ def _save(anim, fig, base, frames):
             extra_args=["-pix_fmt", "yuv420p"]), dpi=DPI)
         print(f"  ✓ {os.path.relpath(mp4, ROOT)}")
     except Exception as e:
-        print(f"  · MP4 omitido ({type(e).__name__}: {e})")
+        print(f"  · MP4 skipped ({type(e).__name__}: {e})")
     plt.close(fig)
 
 
 def main():
-    print("Cargando datos reales de results/ ...")
+    print("Loading real data from results/ ...")
     raw, slam = load_trajectories()
-    print(f"  trayectorias: {len(slam)} nodos")
+    print(f"  trajectories: {len(slam)} nodes")
 
-    print("Cargando mapa SLAM (.ply) ...")
+    print("Loading SLAM map (.ply) ...")
     try:
         mapxyz, mapinten = _read_ply_xyz(
             os.path.join(RES, "slam_optimized_map.ply"), max_points=200000)
-        print(f"  mapa: {len(mapxyz)} puntos")
+        print(f"  map: {len(mapxyz)} points")
     except Exception as e:
-        print(f"  · no se pudo leer el .ply ({e}); registro usará la trayectoria")
+        print(f"  · could not read the .ply ({e}); registration will use the trajectory")
         mapxyz, mapinten = None, None
 
-    print("\n[1/5] Construcción de patches (nube real) ...")
+    print("\n[1/5] Patch construction (real cloud) ...")
     if mapxyz is not None:
         anim_patches(slam, mapxyz, mapinten, os.path.join(OUT, "anim_patches"))
     else:
-        print("  · saltado (sin mapa)")
+        print("  · skipped (no map)")
 
-    print("[2/5] Registro de point clouds (ICP) ...")
+    print("[2/5] Point cloud registration (ICP) ...")
     if mapxyz is not None:
         anim_registration(slam, mapxyz, mapinten,
                           os.path.join(OUT, "anim_registration"))
     else:
-        print("  · saltado (sin mapa)")
+        print("  · skipped (no map)")
 
-    print("[3/5] Cierre de bucle ...")
+    print("[3/5] Loop closure ...")
     anim_loop_closure(raw, slam, os.path.join(OUT, "anim_loop_closure"))
 
-    print("[4/5] Optimización global del pose graph (Levenberg-Marquardt) ...")
+    print("[4/5] Pose graph global optimization (Levenberg-Marquardt) ...")
     anim_global_optimization(raw, slam,
                              os.path.join(OUT, "anim_global_optimization"))
 
-    print("[5/5] Trayectoria raw → SLAM (bonus) ...")
+    print("[5/5] Raw → SLAM trajectory (bonus) ...")
     anim_trajectory(raw, slam, os.path.join(OUT, "anim_trajectory"))
 
-    print(f"\nListo. Material en: {os.path.relpath(OUT, ROOT)}/")
+    print(f"\nDone. Media in: {os.path.relpath(OUT, ROOT)}/")
 
 
 if __name__ == "__main__":

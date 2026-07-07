@@ -11,8 +11,12 @@
     
     <!-- MINEX DERELICTES -->
     <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260507_sparus2_uib_portopi_shipwrecks_and_harbour_entrance/bags/sparus2_multibeam_2026-05-07-06-42-24_0.bag"/>  -->
+    <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/12_52_41/sparus2_multibeam_2026-07-02-10-52-41_0.bag"/>
     <!-- MINEX ESTRENC -->
-    <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260504_sparus2_uib_orat_spanish_minex_portopi/bags/sparus2_multibeam_2026-05-04-13-59-52_0.bag"/> 
+    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260504_sparus2_uib_orat_spanish_minex_portopi/bags/sparus2_multibeam_2026-05-04-13-59-52_0.bag"/>  -->
+    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/sa_colonia/sparus2_multibeam_2025-04-02-12-20-22_0.bag"/> -->
+    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/sparus2_multibeam_2025-09-17-10-52-52_0.bag"/> -->
+    
     <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260507_sparus2_uib_portopi_shipwrecks_and_harbour_entrance/bags/sparus2_multibeam_2026-05-07-06-42-24_0.bag"/> -->
     <!-- <arg name="sss_bagfile" default="/media/uib/Datos/bagfiles/MINEX/2026/20260507_sparus2_uib_portopi_shipwrecks_and_harbour_entrance/bags/sparus2_sidescan_2026-05-07-07-11-18_0.bag"/>  -->
 
@@ -30,12 +34,48 @@
     <arg name="voxel_size" default="0.01"/>
 
     <!-- ****************** PATCH / PREPROCESADO ****************** -->
-    <!-- Barridos por patch y avance entre patches (solape = 1 - stride/size). -->
-    <arg name="patch_size"        default="100"/>
-    <arg name="patch_stride"      default="20"/>
-    <!-- Voxel de submuestreo del patch (m) y voxel del mapa final (m). -->
-    <arg name="patch_voxel_size"  default="0.25"/>
+    <!-- ============================================================================
+         AJUSTE POR ALTITUD DE VUELO (crítico)
+
+         La huella across-track del MBES en el fondo crece con la altitud:
+             swath ≈ 2 · altitud · tan(angle_cutoff_deg)   (≈2.9·altitud a 55°)
+         A ~15 m (Cabrera, El Sec) la franja mide ~40 m; a 3 m (andratx octagons)
+         solo ~10 m. Un patch es una franja fina; tras voxel_down_sample tiene tantos
+         menos vóxeles cuanto más baja la altitud. Si el patch cae por debajo de
+         MIN_PATCH_POINTS (=500, constante en multibeam_slam.py) se DESCARTA.
+
+         En el bag actual (octagons, altitud MEDIANA 3.0 m) los valores de 15 m
+         (patch_size=50, patch_voxel_size=0.25) daban una MEDIANA de ~132 vóxeles/patch
+         → 7315/7357 patches rechazados por min-points, solo 64 construidos, se
+         reconstruía únicamente una esquina (~37×31 m de los 74×36 m). Verificado con
+         replay instrumentado del bucle de patches. Ver memoria del proyecto
+         'andratx-octagons-lowalt-patch-starvation'.
+
+         Regla práctica para reajustar patch_size / patch_voxel_size según altitud
+         (mantener MIN_CELDAS_PATCH ~= 500 vóxeles supervivientes por patch):
+
+           Altitud    swath@55°   patch_size   patch_voxel_size   patch_stride
+           ~3 m       ~10 m       200          0.10               80   (ESTE bag)
+           ~6-8 m     ~20 m       100          0.15               40
+           ~12-15 m   ~40 m        50          0.25               20   (Cabrera/El Sec)
+
+         Al bajar patch_voxel_size sube nº de vóxeles ~ (0.25/v)^2; al subir
+         patch_size la franja se alarga along-track (~lineal). Mantén el solape
+         (1 - stride/size) en ~60-80%. Si cambias de dataset: mide la altitud
+         (nav.altitude) y la anchura de swath real de un scan, y reajusta aquí.
+         ============================================================================ -->
+    <!-- Barridos por patch y avance entre patches (solape = 1 - stride/size).
+         Valores para vuelo RASANTE ~3 m (andratx octagons). Para ~15 m usar 50/20. -->
+    <arg name="patch_size"        default="200"/>
+    <arg name="patch_stride"      default="80"/>
+    <!-- Voxel de submuestreo del patch (m) y voxel del mapa final (m).
+         0.10 m (no 0.25) porque a 3 m de altitud la franja es estrecha y con
+         voxel 0.25 el patch no llega a MIN_PATCH_POINTS. -->
+    <arg name="patch_voxel_size"  default="0.10"/>
     <arg name="final_downsample"  default="0.2"/>
+    <!-- Lado de celda (m) de la rejilla del consistency error de Roman 2006
+         (métrica primaria SOTA: dispersión vertical en zonas de solape). -->
+    <arg name="consistency_cell_size" default="1.0"/>
     <!-- Recorte por ángulo de incidencia desde el nadir (grados); descarta los
          haces más rasantes y ruidosos. -->
     <arg name="angle_cutoff_deg"  default="55.0"/>
@@ -56,6 +96,18 @@
     <!-- Sequential ICP–navigation consistency gates -->
     <arg name="max_seq_icp_translation_dev"  default="0.5"/>
     <arg name="max_seq_icp_yaw_dev"          default="15.0"/>
+    <!-- El umbral de desviación de traslación escala con el PASO INS del par:
+         umbral_efectivo = max(max_seq_icp_translation_dev, gain·paso_INS). Con
+         patches poco solapados (patch_stride grande, paso ~0.5 m) el umbral fijo de
+         0.5 m rechazaba correcciones válidas (26% de los registros). gain=0.5 permite
+         ~medio paso de deriva; gain=0 recupera el umbral absoluto anterior. -->
+    <arg name="seq_tr_dev_step_gain"         default="0.5"/>
+    <!-- Modulación de los gates por textura geométrica del par: estricto en fondo
+         plano, relajado donde hay relieve fiable. relax=1.0 desactiva (umbral
+         fijo); full = textura a la que se alcanza la relajación plena.
+         relax=2.0, full=0.30 → plano 0.5m/15°, relieve pleno 1.0m/30°. -->
+    <arg name="seq_gate_texture_relax"       default="2.0"/>
+    <arg name="seq_gate_texture_full"        default="0.30"/>
     <!-- Fix A: ICP translation length-ratio band (rescale to INS if outside) -->
     <arg name="min_seq_icp_length_ratio"     default="0.85"/>
     <arg name="max_seq_icp_length_ratio"     default="1.15"/>
@@ -72,14 +124,103 @@
     <arg name="enable_loop_closure" default="true"/>
     <!-- Loop closure validation gates -->
     <arg name="max_loop_ins_distance"      default="12.0"/>
+    <!-- Gate de consistencia INS↔cierre (3 condiciones AND, distingue revisita
+         real de franja paralela del lawnmower):
+         1) max_loop_revisit_ins_dist: un cierre real es entre puntos que el INS
+            sitúa CERCA (las franjas paralelas, separadas lateralmente, quedan
+            fuera). Subir en misiones con más deriva esperada.
+         2) min_loop_icp_ins_ratio: |T_raw_xy|/ins_distance mínimo; rechaza
+            |T_raw|≈0 (falso positivo de fondo similar). Solo se aplica si
+            ins_distance >= min_ins_dist_for_ratio_check.
+         3) max_loop_ins_discrepancy: cota superior de ||T_raw − T_ins_rel||. -->
+    <arg name="max_loop_revisit_ins_dist"  default="2.5"/>
     <arg name="min_loop_icp_ins_ratio"     default="0.40"/>
     <arg name="min_ins_dist_for_ratio_check" default="2.0"/>
+    <arg name="max_loop_ins_discrepancy"   default="8.0"/>
     <!-- Gap temporal mínimo entre patches para ser candidato a loop closure. -->
     <arg name="min_loop_temporal_gap"        default="25"/>
+    <!-- Cross-track overlap (R0.2, Torroba 2020): aristas entre franjas paralelas
+         ADYACENTES (vecinas en espacio, lejanas en tiempo). Corrige la deriva entre
+         líneas del lawnmower sin necesidad de cruces. Banda de distancia INS para
+         considerar dos patches franjas vecinas; gap temporal para excluir vecindad
+         secuencial; calidad y coherencia mínimas del registro.
+
+         La banda [min,max] DEBE rodear la SEPARACIÓN REAL entre líneas vecinas del
+         lawnmower, no el solape. Medido en el bag de ablación (lawnmower de 7 franjas,
+         AUV a ~15 m): separación INS muy regular de ~23 m, con ~46% de solape lateral
+         (half-swath 21.4 m a cutoff 55°). La banda previa [1.5, 8.0] m quedaba POR
+         DEBAJO de esos 23 m → el KD-tree nunca emparejaba la franja vecina; cogía
+         patches de la misma franja o de los giros, y el gate de discrepancia (3 m) los
+         rechazaba todos (0/42 aceptadas → ablación R0→R3 plana). Banda [12, 35] m para
+         centrar los ~23 m de separación y tolerar la deriva acumulada entre líneas.
+
+         AUTO-TUNE (xtrack_auto_tune=true, por defecto): en vez de fijar la banda a
+         mano, el nodo MIDE la separación real entre pasadas vecinas del propio
+         recorrido INS (para cada patch, vecino espacial más cercano no-secuencial;
+         mediana de esas distancias) y centra [min,max] en ella con tolerancia
+         relativa xtrack_auto_band_tol (±50%). El gap temporal se deriva de cuántos
+         patches transcurren hasta revisitar la vecindad. Así la banda se adapta sola
+         a lawnmower (Cabrera ~23 m), octógonos (Andratx 10-22 m) o lo que venga, sin
+         re-medir a mano. Los valores xtrack_min/max_ins_dist de abajo son el RESPALDO
+         si el auto-tune se desactiva o no encuentra pasadas vecinas suficientes. -->
+    <arg name="enable_cross_track_edges"     default="true"/>
+    <arg name="xtrack_auto_tune"             default="true"/>
+    <arg name="xtrack_auto_band_tol"         default="0.5"/>
+    <arg name="xtrack_min_ins_dist"          default="12.0"/>
+    <arg name="xtrack_max_ins_dist"          default="35.0"/>
+    <arg name="xtrack_min_temporal_gap"      default="40"/>
+    <arg name="xtrack_max_edges_per_patch"   default="2"/>
+    <arg name="xtrack_min_fitness"           default="0.30"/>
+    <arg name="xtrack_max_ins_discrepancy"   default="3.0"/>
+    <!-- pICP (R1, Palomer 2016/Censi 2007): información de arista ANISÓTROPA desde la
+         covarianza real del registro (baja cross-track en fondo plano). false =
+         información isótropa previa (para ablación R0 vs R1). -->
+    <arg name="use_registration_covariance"  default="true"/>
+    <!-- Back-end robusto (R2, line process de Choi 2015 ≈ Switchable Constraints):
+         desactiva automáticamente aristas espurias (falsos positivos de franja
+         paralela) sin gates manuales. edge_prune_threshold: agresividad de poda;
+         preference_loop_closure: <1.0 = más escéptico con loops/cross-track.
+
+         AJUSTE Andratx octógonos: en esta misión el INS bruto ya es muy bueno
+         (octógonos anidados limpios, deriva mínima en 55×36 m) y con max_loop_candidates=3
+         se aceptaban 137 loops; el optimizador LM DIVERGÍA (correcciones de hasta 89 m,
+         path SLAM 2032 m vs 1034 m raw) porque el conjunto de restricciones, aunque cada
+         una plausible, es degenerado en las zonas de menos textura. El line process no
+         lo atajaba (0/141 aristas desactivadas: son individualmente consistentes). Se
+         desconfía MÁS de las aristas de loop/cross-track y se poda más agresivo:
+         preference 0.6->0.3, prune 0.25->0.4. Combínalo con max_loop_candidates=1 y el
+         gate de salto máximo (max_node_correction_m) de abajo. -->
+    <arg name="edge_prune_threshold"          default="0.4"/>
+    <arg name="preference_loop_closure"       default="0.3"/>
+    <!-- Gate anti-divergencia (post-optimización): el line process actúa por arista y
+         no ve la divergencia COLECTIVA del optimizador. Si un nodo se corrige en XY más
+         de max_node_correction_m respecto al INS, se revierte a la navegación bruta
+         (el INS deriva pocos metros en misiones compactas). 0 desactiva el gate. -->
+    <arg name="max_node_correction_m"         default="10.0"/>
+    <!-- R3 (aportación novel): usar el BACKSCATTER en el modelo de incertidumbre.
+         Donde la geometría es plana pero la intensidad tiene textura, reduce la
+         incertidumbre cross-track. intensity_cov_gain escala la reducción máxima. -->
+    <arg name="use_intensity_in_covariance"   default="true"/>
+    <arg name="intensity_cov_gain"            default="1.0"/>
     <!-- Selección de candidatos por Scan Context: umbral de distancia (menor =
-         más similar) y nº máximo de candidatos por patch a evaluar con ICP. -->
+         más similar) y nº máximo de candidatos por patch a evaluar con ICP.
+         max_loop_candidates=1 (era 3): con 1838 nodos y revisitas densas del octógono,
+         3 candidatos/nodo saturaban el grafo con 137 aristas y hacían diverger LM.
+         1 candidato deja solo el mejor cierre por nodo. -->
     <arg name="scan_context_threshold"       default="0.15"/>
-    <arg name="max_loop_candidates"          default="3"/>
+    <arg name="max_loop_candidates"          default="1"/>
+    <!-- Voxel del RANSAC-FPFH del loop closure, DESACOPLADO del voxel del patch.
+         El voxel del patch se afina por altitud (0.10 m en vuelo rasante), pero
+         FPFH necesita soporte GRUESO para discriminar: con voxel 0.10 el umbral de
+         correspondencia caía a 0.15 m y RANSAC fallaba 5362/5380 veces PESE A HABER
+         RELIEVE. Se usa max(patch_voxel, loop_ransac_voxel, loop_ransac_min_voxel). -->
+    <arg name="loop_ransac_voxel"            default="0.30"/>
+    <arg name="loop_ransac_min_voxel"        default="0.25"/>
+    <!-- Poda pre-RANSAC: salta el par si NINGUNO de los dos patches tiene relieve
+         (textura geométrica < umbral) — FPFH no discrimina en plano y RANSAC no
+         converge. Conservador (umbral bajo): con relieve real no poda nada.
+         0.0 desactiva la poda. -->
+    <arg name="loop_min_texture_for_ransac"  default="0.05"/>
     <!-- Umbrales de aceptación del cierre (más estrictos que el secuencial). -->
     <arg name="loop_fitness_threshold"       default="0.90"/>
     <arg name="loop_rmse_threshold"          default="0.375"/> <!-- ≈ patch_voxel_size*1.5 -->
@@ -124,6 +265,7 @@
         <param name="patch_stride"      value="$(arg patch_stride)" />
         <param name="patch_voxel_size"  value="$(arg patch_voxel_size)" />
         <param name="final_downsample"  value="$(arg final_downsample)" />
+        <param name="consistency_cell_size" value="$(arg consistency_cell_size)" />
         <param name="angle_cutoff_deg"  value="$(arg angle_cutoff_deg)" />
         <param name="fitness_threshold"   value="$(arg fitness_threshold)" />
         <param name="seq_rmse_threshold"  value="$(arg seq_rmse_threshold)" />
@@ -133,6 +275,9 @@
         <param name="hybrid_min_texture"            value="$(arg hybrid_min_texture)" />
         <param name="max_seq_icp_translation_dev" value="$(arg max_seq_icp_translation_dev)" />
         <param name="max_seq_icp_yaw_dev"         value="$(arg max_seq_icp_yaw_dev)" />
+        <param name="seq_tr_dev_step_gain"        value="$(arg seq_tr_dev_step_gain)" />
+        <param name="seq_gate_texture_relax"      value="$(arg seq_gate_texture_relax)" />
+        <param name="seq_gate_texture_full"       value="$(arg seq_gate_texture_full)" />
         <param name="min_seq_icp_length_ratio"    value="$(arg min_seq_icp_length_ratio)" />
         <param name="max_seq_icp_length_ratio"    value="$(arg max_seq_icp_length_ratio)" />
         <param name="seq_anchor_scale"            value="$(arg seq_anchor_scale)" />
@@ -142,10 +287,30 @@
         <param name="ndt_min_points_per_voxel" value="$(arg ndt_min_points_per_voxel)" />
         <param name="enable_loop_closure"          value="$(arg enable_loop_closure)" />
         <param name="max_loop_ins_distance"         value="$(arg max_loop_ins_distance)" />
+        <param name="max_loop_ins_discrepancy"      value="$(arg max_loop_ins_discrepancy)" />
+        <param name="max_loop_revisit_ins_dist"     value="$(arg max_loop_revisit_ins_dist)" />
         <param name="min_loop_icp_ins_ratio"        value="$(arg min_loop_icp_ins_ratio)" />
         <param name="min_ins_dist_for_ratio_check"  value="$(arg min_ins_dist_for_ratio_check)" />
         <param name="min_loop_temporal_gap"         value="$(arg min_loop_temporal_gap)" />
+        <param name="enable_cross_track_edges"      value="$(arg enable_cross_track_edges)" />
+        <param name="xtrack_auto_tune"              value="$(arg xtrack_auto_tune)" />
+        <param name="xtrack_auto_band_tol"          value="$(arg xtrack_auto_band_tol)" />
+        <param name="xtrack_min_ins_dist"           value="$(arg xtrack_min_ins_dist)" />
+        <param name="xtrack_max_ins_dist"           value="$(arg xtrack_max_ins_dist)" />
+        <param name="xtrack_min_temporal_gap"       value="$(arg xtrack_min_temporal_gap)" />
+        <param name="xtrack_max_edges_per_patch"    value="$(arg xtrack_max_edges_per_patch)" />
+        <param name="xtrack_min_fitness"            value="$(arg xtrack_min_fitness)" />
+        <param name="xtrack_max_ins_discrepancy"    value="$(arg xtrack_max_ins_discrepancy)" />
+        <param name="use_registration_covariance"   value="$(arg use_registration_covariance)" />
+        <param name="edge_prune_threshold"          value="$(arg edge_prune_threshold)" />
+        <param name="preference_loop_closure"       value="$(arg preference_loop_closure)" />
+        <param name="max_node_correction_m"         value="$(arg max_node_correction_m)" />
+        <param name="use_intensity_in_covariance"   value="$(arg use_intensity_in_covariance)" />
+        <param name="intensity_cov_gain"            value="$(arg intensity_cov_gain)" />
         <param name="scan_context_threshold"        value="$(arg scan_context_threshold)" />
+        <param name="loop_ransac_voxel"             value="$(arg loop_ransac_voxel)" />
+        <param name="loop_ransac_min_voxel"         value="$(arg loop_ransac_min_voxel)" />
+        <param name="loop_min_texture_for_ransac"   value="$(arg loop_min_texture_for_ransac)" />
         <param name="max_loop_candidates"           value="$(arg max_loop_candidates)" />
         <param name="loop_fitness_threshold"        value="$(arg loop_fitness_threshold)" />
         <param name="loop_rmse_threshold"           value="$(arg loop_rmse_threshold)" />

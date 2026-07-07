@@ -6,21 +6,21 @@ import numpy as np
 from collections import OrderedDict
 
 
-# Umbral mínimo de correspondencias para considerar un resultado ICP válido.
-# Si ninguna escala supera este umbral el resultado se descarta.
+# Minimum correspondence count to consider an ICP result valid.
+# If no scale exceeds this threshold the result is discarded.
 _MIN_ICP_CORRESPONDENCES = 30
 
 
 # -----------------------------------------------------------------------------
-# CACHÉ DE PREPROCESADO (downsample + normales) POR NUBE Y ESCALA
+# PREPROCESSING CACHE (downsample + normals) PER CLOUD AND SCALE
 # -----------------------------------------------------------------------------
-# En el registro secuencial cada patch.pcd participa en dos registros
-# consecutivos (como source en idx y como target en idx+1) y el ICP multiescala
-# repite voxel_down_sample + estimate_normals sobre la MISMA nube a las mismas
-# escalas. Cacheando el resultado por (id(pcd), voxel) se evita ~la mitad del
-# preprocesado. La clave es id(pcd): los patches son objetos persistentes, así
-# que el id es estable durante todo el run. El caché se acota para no crecer
-# sin límite (LRU simple por inserción).
+# In sequential registration each patch.pcd takes part in two consecutive
+# registrations (as source at idx and as target at idx+1) and the multiscale ICP
+# repeats voxel_down_sample + estimate_normals on the SAME cloud at the same
+# scales. Caching the result by (id(pcd), voxel) avoids ~half the preprocessing.
+# The key is id(pcd): patches are persistent objects, so the id is stable for
+# the whole run. The cache is bounded so it does not grow unboundedly (simple
+# LRU by insertion).
 # -----------------------------------------------------------------------------
 
 _PREP_CACHE = OrderedDict()
@@ -28,13 +28,13 @@ _PREP_CACHE_MAX = 4096
 
 
 def _preprocessed(pcd, voxel):
-    """voxel_down_sample + estimate_normals con caché LRU por (id(pcd), voxel)."""
+    """voxel_down_sample + estimate_normals with LRU cache by (id(pcd), voxel)."""
 
     key = (id(pcd), round(voxel, 4))
 
     cached = _PREP_CACHE.get(key)
     if cached is not None:
-        # Refresca la posición LRU: lo recién usado pasa a ser lo más reciente.
+        # Refresh LRU position: the just-used entry becomes the most recent.
         _PREP_CACHE.move_to_end(key)
         return cached
 
@@ -48,10 +48,10 @@ def _preprocessed(pcd, voxel):
             )
         )
 
-    # Evicción LRU real: descarta SOLO la entrada menos usada recientemente, en
-    # vez de vaciar todo el caché. En loop closure un mismo patch se preprocesa
-    # muchas veces; vaciar el caché entero obligaba a recalcular nubes que se
-    # volvían a pedir de inmediato. El resultado preprocesado es idéntico.
+    # Real LRU eviction: discard ONLY the least recently used entry, instead of
+    # flushing the whole cache. In loop closure the same patch is preprocessed
+    # many times; flushing the entire cache forced recomputing clouds that were
+    # requested again immediately. The preprocessed result is identical.
     if len(_PREP_CACHE) >= _PREP_CACHE_MAX:
         _PREP_CACHE.popitem(last=False)
 
@@ -60,7 +60,7 @@ def _preprocessed(pcd, voxel):
 
 
 def clear_preprocess_cache():
-    """Limpia el caché de preprocesado (llamar entre runs si procede)."""
+    """Clear the preprocessing cache (call between runs if appropriate)."""
     _PREP_CACHE.clear()
 
 
@@ -71,14 +71,14 @@ def robust_icp(
         icp_distance=2.0,
         max_iter=60):
 
-    # Escalas de voxel de mayor a menor (coarse-to-fine).
-    # Se empieza con el voxel grande para alinear globalmente
-    # y se refina en cada paso.
+    # Voxel scales from largest to smallest (coarse-to-fine).
+    # Start with the large voxel for global alignment
+    # and refine at each step.
     voxel_scales = [1.0, 0.5, 0.25]
 
-    # La transformación actual solo se actualiza si el resultado
-    # de esa escala tiene correspondencias reales (fitness > 0).
-    # De este modo un paso fallido no corrompe el siguiente.
+    # The current transform is updated only if that scale's result
+    # has real correspondences (fitness > 0).
+    # This way a failed step does not corrupt the next one.
     current_transform = T_init.copy()
 
     final_result = None
@@ -96,8 +96,8 @@ def robust_icp(
 
         voxel = 0.5 * voxel_scale
 
-        # Downsample + normales cacheados por (id(pcd), voxel): evita reprocesar
-        # la misma nube en registros consecutivos.
+        # Downsample + normals cached by (id(pcd), voxel): avoids reprocessing
+        # the same cloud in consecutive registrations.
         s = _preprocessed(source, voxel)
         t = _preprocessed(target, voxel)
 
@@ -145,16 +145,16 @@ def robust_icp(
                 )
             )
 
-        # Solo propagar la transformación si esta escala produjo
-        # correspondencias reales. Si fitness=0 la transformación
-        # devuelta es inválida y no debe usarse como semilla.
+        # Only propagate the transform if this scale produced
+        # real correspondences. If fitness=0 the returned transform
+        # is invalid and must not be used as a seed.
         if len(result.correspondence_set) >= _MIN_ICP_CORRESPONDENCES:
             current_transform = result.transformation
             final_result = result
 
-    # Si el mejor resultado acumulado tiene fitness=0 (ninguna escala
-    # encontró correspondencias suficientes) se devuelve None para que
-    # el pipeline use el fallback de navegación con info baja.
+    # If the best accumulated result has fitness=0 (no scale found
+    # enough correspondences) return None so the pipeline uses the
+    # navigation fallback with low info.
     if final_result is None:
         return None
 
@@ -165,20 +165,20 @@ def robust_icp(
 
 
 # -----------------------------------------------------------------------------
-# DETECCIÓN DE TEXTURA GEOMÉTRICA
+# GEOMETRIC TEXTURE DETECTION
 # -----------------------------------------------------------------------------
-# Mide si un par de patches tiene suficiente relieve geométrico para que el ICP
-# geométrico restrinja la traslación XY. En fondo plano las normales apuntan
-# casi todas hacia arriba (|nz|≈1) → la geometría no discrimina XY y el ICP
-# desliza. La fracción de normales NO verticales es un proxy barato de "textura
-# geométrica disponible".
+# Measures whether a patch pair has enough geometric relief for geometric ICP
+# to constrain the XY translation. On flat bottom the normals point almost all
+# upward (|nz|≈1) → geometry does not discriminate XY and ICP slides. The
+# fraction of NON-vertical normals is a cheap proxy for "available geometric
+# texture".
 # -----------------------------------------------------------------------------
 
 def _geometric_texture(pcd, voxel=0.5, slope_thresh=0.85):
     """
-    Fracción de puntos cuya normal NO es casi vertical (|nz| < slope_thresh),
-    es decir, que pertenecen a pendientes/estructura aprovechable por el ICP
-    geométrico. ~0 = fondo plano (geometría inútil para XY), >0.1 = hay relieve.
+    Fraction of points whose normal is NOT nearly vertical (|nz| < slope_thresh),
+    i.e. belonging to slopes/structure usable by geometric ICP. ~0 = flat bottom
+    (geometry useless for XY), >0.1 = relief present.
     """
 
     down = _preprocessed(pcd, voxel)
@@ -203,31 +203,31 @@ def robust_hybrid_icp(
         lambda_geometric=0.6,
         min_geometric_texture=0.08):
     """
-    Registro ADAPTATIVO geometría/intensidad.
+    ADAPTIVE geometry/intensity registration.
 
-    Estrategia: usar ICP GEOMÉTRICO por defecto (es el que mejor funciona en
-    este dataset y no introduce el ruido del término de color), y recurrir al
-    Colored ICP (intensidad acústica) SOLO cuando el par de patches carece de
-    textura geométrica suficiente — el caso para el que la intensidad existe:
-    fondo plano sin relieve donde el ICP geométrico desliza.
+    Strategy: use GEOMETRIC ICP by default (it works best on this dataset and
+    does not introduce the noise of the color term), and fall back to Colored
+    ICP (acoustic intensity) ONLY when the patch pair lacks enough geometric
+    texture — the case intensity exists for: flat featureless bottom where
+    geometric ICP slides.
 
-    Decisión por par:
-      texture = fracción de normales no verticales (relieve aprovechable).
-      Si texture >= min_geometric_texture  → ICP geométrico (robust_icp).
-      Si texture <  min_geometric_texture y hay color → Colored ICP.
+    Per-pair decision:
+      texture = fraction of non-vertical normals (usable relief).
+      If texture >= min_geometric_texture  → geometric ICP (robust_icp).
+      If texture <  min_geometric_texture and color present → Colored ICP.
 
-    De este modo:
-      - En zonas con estructura (barcos): geometría pura, precisa y sin el
-        sesgo de compresión que el color introducía.
-      - En fondo liso sin features: la intensidad aporta el gradiente que la
-        geometría no tiene, evitando el deslizamiento.
+    This way:
+      - In structured areas (ships): pure geometry, precise and without the
+        compression bias the color term introduced.
+      - On smooth featureless bottom: intensity supplies the gradient geometry
+        lacks, avoiding sliding.
 
-    min_geometric_texture: umbral de fracción de normales con pendiente.
-      0.08 = al menos un 8% de puntos en pendiente para fiarse de la geometría.
+    min_geometric_texture: threshold on fraction of sloped normals.
+      0.08 = at least 8% of points on slopes to trust geometry.
     """
 
-    # Textura disponible en ambos patches (se usa la menor: el registro está
-    # limitado por el patch con menos relieve).
+    # Texture available in both patches (use the smaller: registration is
+    # limited by the patch with least relief).
     tex_s = _geometric_texture(source)
     tex_t = _geometric_texture(target)
     texture = min(tex_s, tex_t)
@@ -235,7 +235,7 @@ def robust_hybrid_icp(
     has_color = source.has_colors() and target.has_colors()
 
     if texture >= min_geometric_texture or not has_color:
-        # Hay relieve aprovechable (o no hay intensidad): geometría pura.
+        # Usable relief present (or no intensity): pure geometry.
         return robust_icp(
             source,
             target,
@@ -244,7 +244,7 @@ def robust_hybrid_icp(
             max_iter=max_iter
         )
 
-    # Fondo plano sin textura geométrica: apoyarse en la intensidad.
+    # Flat bottom without geometric texture: rely on intensity.
     result = robust_colored_icp(
         source,
         target,
@@ -257,7 +257,7 @@ def robust_hybrid_icp(
     if result is not None:
         return result
 
-    # Si el Colored ICP falla, último recurso geométrico.
+    # If Colored ICP fails, geometric last resort.
     return robust_icp(
         source,
         target,
@@ -275,25 +275,25 @@ def robust_colored_icp(
         max_iter=60,
         lambda_geometric=0.6):
     """
-    ICP coarse-to-fine que combina geometría e INTENSIDAD acústica
-    (Colored ICP de Open3D, Park et al. 2017).
+    Coarse-to-fine ICP combining geometry and acoustic INTENSITY
+    (Open3D Colored ICP, Park et al. 2017).
 
-    La intensidad (backscatter) viaja en el canal de color de las nubes
-    (gris normalizado, cargado en PatchBuilder). El coste optimizado es:
+    Intensity (backscatter) travels in the cloud color channel (normalized
+    gray, loaded in PatchBuilder). The optimized cost is:
 
         E = (1 - λ) · E_color + λ · E_geometric
 
-    En fondo plano E_geometric tiene gradiente ≈0 en XY (el ICP geométrico
-    desliza), pero E_color SÍ tiene gradiente porque la textura de intensidad
-    varía espacialmente → la alineación deja de deslizar. En zonas con relieve
-    real (barcos) la geometría sigue dominando vía λ.
+    On flat bottom E_geometric has gradient ≈0 in XY (geometric ICP slides),
+    but E_color DOES have gradient because intensity texture varies spatially
+    → alignment stops sliding. In areas with real relief (ships) geometry still
+    dominates via λ.
 
-    lambda_geometric ∈ [0,1]: 1.0 = solo geometría (≡ ICP normal),
-    valores menores dan más peso a la intensidad. 0.6 es un punto de partida
-    razonable para fondo plano con estructura concentrada.
+    lambda_geometric ∈ [0,1]: 1.0 = geometry only (≡ normal ICP),
+    smaller values give more weight to intensity. 0.6 is a reasonable starting
+    point for flat bottom with concentrated structure.
 
-    Requiere que source y target tengan `colors`. Si no los tienen, se delega
-    en robust_icp (geométrico puro).
+    Requires source and target to have `colors`. If they don't, delegates to
+    robust_icp (pure geometric).
     """
 
     if (
@@ -324,9 +324,9 @@ def robust_colored_icp(
 
         voxel = 0.5 * voxel_scale
 
-        # Cacheado por (id(pcd), voxel). voxel_down_sample conserva los colores
-        # (la intensidad), que el Colored ICP necesita, y _preprocessed añade
-        # las normales sin tocar el color.
+        # Cached by (id(pcd), voxel). voxel_down_sample preserves the colors
+        # (intensity), which Colored ICP needs, and _preprocessed adds the
+        # normals without touching the color.
         s = _preprocessed(source, voxel)
         t = _preprocessed(target, voxel)
 
@@ -352,8 +352,8 @@ def robust_colored_icp(
 
         except RuntimeError:
 
-            # Colored ICP puede lanzar si una escala carece de gradiente de
-            # color suficiente; se conserva la transformada previa.
+            # Colored ICP may raise if a scale lacks enough color gradient;
+            # keep the previous transform.
             continue
 
         if len(result.correspondence_set) >= _MIN_ICP_CORRESPONDENCES:

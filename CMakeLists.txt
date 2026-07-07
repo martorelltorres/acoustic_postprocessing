@@ -23,5 +23,6 @@ catkin_python_setup()
 catkin_install_python(PROGRAMS
   scripts/multibeam_slam.py
   scripts/make_presentation_media.py
+  scripts/run_ablation.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

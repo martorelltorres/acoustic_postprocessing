@@ -26,20 +26,20 @@ def constrain_transform(
         max_translation=5,
         T_ref=None):
     """
-    Proyecta una transformación ICP a un movimiento 2D acotado (yaw + XY,
-    con Z=roll=pitch=0).
+    Projects an ICP transform to a bounded 2D motion (yaw + XY,
+    with Z=roll=pitch=0).
 
-    El recorte de yaw se aplica como DESVIACIÓN respecto a una rotación de
-    referencia ``T_ref`` (normalmente T_init de la navegación INS), NO en
-    valor absoluto.
+    Yaw clipping is applied as a DEVIATION from a reference rotation
+    ``T_ref`` (normally T_init from the INS navigation), NOT in
+    absolute value.
 
-    Motivo: en los giros del lawnmower la rotación relativa real entre patches
-    consecutivos puede llegar a ~172°. Recortar el yaw a ±15° ABSOLUTO impedía
-    seguir esos giros y producía una deriva rotacional acumulada catastrófica.
-    Con la referencia, el giro real de la INS pasa íntegro y solo se limita la
-    CORRECCIÓN que el ICP añade encima (±max_yaw_deg).
+    Rationale: in the lawnmower turns the real relative rotation between
+    consecutive patches can reach ~172°. Clipping yaw to ±15° ABSOLUTE prevented
+    tracking those turns and produced a catastrophic accumulated rotational drift.
+    With the reference, the real INS turn passes through intact and only the
+    CORRECTION the ICP adds on top is limited (±max_yaw_deg).
 
-    Si ``T_ref is None`` se mantiene el comportamiento histórico (clip absoluto).
+    If ``T_ref is None`` the historical behavior is kept (absolute clip).
     """
 
     yaw = np.degrees(
@@ -51,7 +51,7 @@ def constrain_transform(
 
     if T_ref is None:
 
-        # Comportamiento histórico: recorte absoluto.
+        # Historical behavior: absolute clip.
         yaw = np.clip(
             yaw,
             -max_yaw_deg,
@@ -60,7 +60,7 @@ def constrain_transform(
 
     else:
 
-        # Recorte relativo a la rotación de referencia (INS).
+        # Clip relative to the reference rotation (INS).
         ref_yaw = np.degrees(
             np.arctan2(
                 T_ref[1, 0],
@@ -68,10 +68,10 @@ def constrain_transform(
             )
         )
 
-        # Desviación del ICP respecto a la referencia, envuelta a [-180, 180].
+        # ICP deviation from the reference, wrapped to [-180, 180].
         delta = wrap_angle_deg(yaw - ref_yaw)
 
-        # Solo se limita la corrección que el ICP añade sobre la INS.
+        # Only the correction the ICP adds on top of the INS is limited.
         delta = np.clip(
             delta,
             -max_yaw_deg,
@@ -115,47 +115,47 @@ def ins_rotation_icp_translation(
         anchor_scale=False,
         cross_track_gain=1.0):
     """
-    Construye una transformación SE(3) tomando la ROTACIÓN COMPLETA de la
-    navegación INS (``T_init``) y la TRASLACIÓN del resultado ICP (``T_icp``),
-    corregida en el plano de avance.
+    Builds an SE(3) transform taking the FULL ROTATION from the
+    INS navigation (``T_init``) and the TRANSLATION from the ICP result (``T_icp``),
+    corrected in the travel plane.
 
-    Motivo (rotación): en un fondo marino plano y sin estructura, la rotación
-    estimada por el ICP es ruido aleatorio (std ~19°/paso, media ≈0). Integrada
-    sobre cientos de aristas produce un random walk rotacional que desvía la
-    trayectoria. El DVL+IMU de la INS mide la rotación con fiabilidad.
+    Rationale (rotation): on a flat, structureless seafloor, the rotation
+    estimated by the ICP is random noise (std ~19°/step, mean ≈0). Integrated
+    over hundreds of edges it produces a rotational random walk that drifts the
+    trajectory. The INS DVL+IMU measures rotation reliably.
 
-    Opción A — arista SE(3) completa (no 2D):
-    La versión anterior reconstruía la arista como 2D pura (Z=0, roll=pitch=0,
-    yaw = arctan2(T_init[1,0], T_init[0,0])). Eso es correcto en tramos rectos y
-    planos, pero en los GIROS del lawnmower el AUV tiene pitch: la extracción de
-    yaw del frame local mezcla pitch+yaw y la proyección XY no conserva la
-    longitud del paso → cada giro comprime y rota ligeramente mal, y el error se
-    acumula (deriva que crece con la trayectoria, correlación error-distancia
-    0.84). Conservando la rotación 3D íntegra de T_init y la componente Z de la
-    traslación, la geometría del paso se preserva exactamente en los giros.
+    Option A — full SE(3) edge (not 2D):
+    The previous version rebuilt the edge as pure 2D (Z=0, roll=pitch=0,
+    yaw = arctan2(T_init[1,0], T_init[0,0])). That is correct on straight, flat
+    segments, but in the lawnmower TURNS the AUV has pitch: extracting yaw from
+    the local frame mixes pitch+yaw and the XY projection does not preserve the
+    step length → each turn compresses and rotates slightly wrong, and the error
+    accumulates (drift growing with the trajectory, error-distance correlation
+    0.84). Keeping the full 3D rotation of T_init and the Z component of the
+    translation, the step geometry is preserved exactly in the turns.
 
-    Traslación: se parte de la traslación 3D de T_init (paso INS fiable) y se le
-    aplica la corrección XY del ICP en el plano, con control de escala:
+    Translation: starts from the 3D translation of T_init (reliable INS step) and
+    applies the ICP XY correction in the plane, with scale control:
 
-    - ``anchor_scale=True``: la magnitud XY se fija a la del paso INS y el ICP
-      solo aporta dirección (corrige el sesgo de compresión del ICP).
-    - Gate de longitud (Fix A): si ``anchor_scale=False``, solo se reescala a la
-      INS cuando el ratio |T_icp_xy|/|T_init_xy| sale de la banda.
+    - ``anchor_scale=True``: the XY magnitude is fixed to that of the INS step and
+      the ICP only provides direction (corrects the ICP compression bias).
+    - Length gate (Fix A): if ``anchor_scale=False``, it is only rescaled to the
+      INS when the ratio |T_icp_xy|/|T_init_xy| falls outside the band.
 
-    Opción A1 — amortiguación de la corrección cross-track (``cross_track_gain``):
-    La traslación XY del ICP se descompone en ALONG-TRACK (dirección de avance de
-    la INS) y CROSS-TRACK (perpendicular). La componente cross-track del ICP
-    introduce un sesgo lateral sistemático (medido +23 mm/paso en los giros,
-    siempre hacia +East) que corre el patrón del lawnmower y produce el efecto
-    "se contrae a la izquierda, se sobrepasa a la derecha". Con la INS fiable en
-    heading, esa corrección lateral solo añade error. ``cross_track_gain`` escala
-    SOLO la componente cross-track:
-      gain=1.0 → corrección lateral plena del ICP (comportamiento previo)
-      gain<1.0 → amortigua el sesgo lateral
-      gain=0.0 → along-track del ICP + cross-track de la INS (sin sesgo lateral)
-    El along-track (escala de avance) se conserva intacto.
+    Option A1 — cross-track correction damping (``cross_track_gain``):
+    The ICP XY translation is decomposed into ALONG-TRACK (INS travel direction)
+    and CROSS-TRACK (perpendicular). The ICP cross-track component
+    introduces a systematic lateral bias (measured +23 mm/step in the turns,
+    always toward +East) that shifts the lawnmower pattern and produces the
+    "contracts to the left, overshoots to the right" effect. With a reliable INS
+    in heading, that lateral correction only adds error. ``cross_track_gain`` scales
+    ONLY the cross-track component:
+      gain=1.0 → full ICP lateral correction (previous behavior)
+      gain<1.0 → dampens the lateral bias
+      gain=0.0 → ICP along-track + INS cross-track (no lateral bias)
+    The along-track (travel scale) is kept intact.
 
-    Salida: SE(3) (matriz 4x4) con la rotación 3D de la INS.
+    Output: SE(3) (4x4 matrix) with the INS 3D rotation.
     """
 
     icp_xy = np.array([
@@ -173,15 +173,15 @@ def ins_rotation_icp_translation(
 
     if anchor_scale:
 
-        # Magnitud del paso real desde el INS, dirección del ICP.
-        # Se ancla a la norma 3D de T_init (se conserva bajo la transformada
-        # rígida) para recuperar la longitud real del paso.
+        # Real step magnitude from the INS, direction from the ICP.
+        # Anchored to the 3D norm of T_init (preserved under the rigid
+        # transform) to recover the real step length.
         ins_len_3d = float(np.linalg.norm(T_init[:3, 3]))
 
         if ins_len_3d > 1e-6 and icp_len > 1e-6:
             icp_xy = icp_xy * (ins_len_3d / icp_len)
         elif ins_len > 1e-6:
-            # Sin dirección ICP fiable: usa la traslación INS XY directamente.
+            # No reliable ICP direction: use the INS XY translation directly.
             icp_xy = ins_xy.copy()
 
     elif (
@@ -189,19 +189,19 @@ def ins_rotation_icp_translation(
         and max_length_ratio is not None
     ):
 
-        # Gate de longitud (Fix A).
+        # Length gate (Fix A).
         if ins_len > 1e-6 and icp_len > 1e-6:
 
             ratio = icp_len / ins_len
 
             if ratio < min_length_ratio or ratio > max_length_ratio:
 
-                # Conserva la dirección del ICP, magnitud de la INS.
+                # Keep the ICP direction, magnitude from the INS.
                 icp_xy = icp_xy * (ins_len / icp_len)
 
-    # Opción A1 — amortiguar la componente cross-track (lateral) del ICP.
-    # Descompone la traslación corregida en along-track (dirección INS) y
-    # cross-track (perpendicular) y reescala solo la lateral por cross_track_gain.
+    # Option A1 — dampen the ICP cross-track (lateral) component.
+    # Decomposes the corrected translation into along-track (INS direction) and
+    # cross-track (perpendicular) and rescales only the lateral one by cross_track_gain.
     if cross_track_gain != 1.0 and ins_len > 1e-6:
 
         ins_dir = ins_xy / ins_len
@@ -224,14 +224,14 @@ def ins_rotation_icp_translation(
         max_translation
     )
 
-    # Rotación 3D íntegra de la INS (Opción A): preserva roll/pitch/yaw reales,
-    # clave para no comprimir ni torcer los giros.
+    # Full 3D rotation of the INS (Option A): preserves real roll/pitch/yaw,
+    # key to not compressing or skewing the turns.
     T_new = np.eye(4)
     T_new[:3, :3] = T_init[:3, :3]
 
-    # Traslación: corrección XY del ICP en el plano, Z del paso INS. Mantener la
-    # Z de T_init conserva la longitud 3D del paso; la restauración vertical
-    # post-optimización ajusta la profundidad absoluta de cada nodo.
+    # Translation: ICP XY correction in the plane, Z from the INS step. Keeping
+    # the Z of T_init preserves the 3D step length; the post-optimization vertical
+    # restoration adjusts the absolute depth of each node.
     T_new[0, 3] = tx
     T_new[1, 3] = ty
     T_new[2, 3] = T_init[2, 3]
@@ -239,12 +239,54 @@ def ins_rotation_icp_translation(
     return T_new
 
 
+def project_to_3dof(T, vertical_ref=None):
+    """
+    Projects an SE(3) transform to the 3-DoF subspace (x, y, yaw), which is the
+    correct regime of gravity-constrained bathymetric registration (Torroba 2020,
+    Tan 2022: 3-DoF beats 6-DoF because INS roll/pitch/Z are reliable and the
+    ICP rotation/Z on flat seafloor is noise).
+
+    Unlike `constrain_transform_2d` (which sets Z = roll = pitch = 0), here the
+    VERTICAL component (Z, roll, pitch) is taken from `vertical_ref` if provided — to
+    keep the reliable part of the INS prior during coarse-to-fine, instead of
+    discarding it. If `vertical_ref` is None, the vertical stays at 0 (equivalent to pure 2D).
+
+    Parameters
+    ----------
+    T : (4,4) array        transform to project (ICP output).
+    vertical_ref : (4,4) array or None
+        transform from which to take Z + roll + pitch (typically T_init / INS prior).
+
+    Returns
+    --------
+    (4,4) array with yaw + XY from T and Z + roll/pitch from vertical_ref (or 0).
+    """
+
+    # yaw of T (rotation in the plane).
+    yaw = np.arctan2(T[1, 0], T[0, 0])
+
+    if vertical_ref is not None:
+        roll, pitch, _ = tr.euler_from_matrix(vertical_ref, axes='sxyz')
+        z = float(vertical_ref[2, 3])
+    else:
+        roll = 0.0
+        pitch = 0.0
+        z = 0.0
+
+    out = tr.euler_matrix(roll, pitch, yaw, axes='sxyz')
+    out[0, 3] = T[0, 3]
+    out[1, 3] = T[1, 3]
+    out[2, 3] = z
+
+    return out
+
+
 def constrain_transform_2d(T):
 
     T2 = np.eye(4)
 
     # ==========================================
-    # EXTRAER YAW
+    # EXTRACT YAW
     # ==========================================
 
     yaw = np.arctan2(
@@ -261,7 +303,7 @@ def constrain_transform_2d(T):
     T2[1, 1] = c
 
     # ==========================================
-    # SOLO XY
+    # XY ONLY
     # ==========================================
 
     T2[0, 3] = T[0, 3]
@@ -302,7 +344,7 @@ def expected_transform(patch_i, patch_j):
         patch_j.pose
     )
 
-    # Transform relativo correcto en SE(3)
+    # Correct relative transform in SE(3)
     T_rel = np.linalg.inv(T_i) @ T_j
 
     return T_rel
