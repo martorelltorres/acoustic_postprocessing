@@ -42,7 +42,10 @@ def main():
         rospy.logerr("ERROR: Missing 'mesh_file' or 'sss_tif' parameters.")
         return
 
-    output_mesh = os.path.join(output_dir, "mb_textured_sss.ply")
+    mesh_dir = os.path.join(output_dir, "mesh")
+    os.makedirs(mesh_dir, exist_ok=True)
+
+    output_mesh = os.path.join(mesh_dir, "mb_textured_sss.ply")
     COLORMAP = cm.gray
     NODATA_VALUE = 0
 

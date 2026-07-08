@@ -62,7 +62,10 @@ def main():
         rospy.logerr("ERROR: 'bag_file' not provided. Aborting.")
         return
 
-    output_img = os.path.join(output_dir, 'sss_waterfall.png')
+    images_dir = os.path.join(output_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
+
+    output_img = os.path.join(images_dir, 'sss_waterfall.png')
 
     rospy.loginfo(f"Generating SSS Waterfall from: {bag_file}")
     bag = rosbag.Bag(bag_file)

@@ -258,7 +258,14 @@ def main():
         rospy.logerr("ERROR: bag_file not provided")
         return
 
-    output_tiff = os.path.join(output_dir, 'sss_mosaic.tif')
+    tif_dir    = os.path.join(output_dir, 'tif')
+    images_dir = os.path.join(output_dir, 'images')
+
+    for d in (tif_dir, images_dir):
+        os.makedirs(d, exist_ok=True)
+
+    output_tiff = os.path.join(tif_dir, 'sss_mosaic.tif')
+    output_jpg  = os.path.join(images_dir, 'sss_mosaic.jpg')
 
     bag = rosbag.Bag(bag_file)
 
@@ -296,6 +303,14 @@ def main():
 
     img8 = enhance_data(img)
 
+    # El CLAHE de enhance_data levanta el fondo vacío por encima de 0, así que el 0
+    # deja de significar "sin dato" y contamina el histograma y el JPG. Reservamos el
+    # 0 para nodata: fondo a 0, celdas con dato a >=1. mb_sss_mosaic_fusion.py usa
+    # `sss_g > 0` como máscara de validez, así que es justo lo que espera.
+    filled = img > 0
+    img8[filled] = np.maximum(img8[filled], 1)
+    img8[~filled] = 0
+
     with rasterio.open(
         output_tiff,
         'w',
@@ -306,13 +321,23 @@ def main():
         dtype=np.uint8,
         crs=CRS_UTM,
         transform=save_geotiff,
-        compress='deflate'
+        compress='deflate',
+        nodata=0
     ) as dst:
         dst.write(img8, 1)
 
     bag.close()
 
     rospy.loginfo(f"GeoTIFF generated: {output_tiff}")
+
+    # JPG del mosaico (visualización) en results/images/. Misma rampa viridis que
+    # mb_intensity.jpg, para poder comparar los dos backscatter a ojo. El fondo sin
+    # dato se fuerza a negro en vez del morado oscuro que le tocaría en viridis.
+    color = cv2.applyColorMap(img8, cv2.COLORMAP_VIRIDIS)
+    color[~filled] = 0
+    cv2.imwrite(output_jpg, color, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+    rospy.loginfo(f"SSS mosaic JPG saved: {output_jpg}")
 
     pub_sss_done = rospy.Publisher('/pipeline/sss_done', Bool, queue_size=1, latch=True)
 

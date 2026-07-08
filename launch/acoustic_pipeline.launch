@@ -1,16 +1,29 @@
 <launch>
     <!-- Acoustic post-processing pipeline.
          Toggle each product with its enable_* flag; nodes run only when true.
-           enable_mb_cloud       -> mb_pointcloud.xyz + mb_mesh.ply
-           enable_mb_intensity   -> mb_intensity.tif  + mb_intensity.xyz
-           enable_sss_mosaic     -> sss_mosaic.tif
-           enable_sss_waterfall  -> sss_waterfall.png
-           enable_mosaic_fusion  -> mb_sss_mosaic.tif (needs mb_intensity + sss_mosaic)
-           enable_fusion         -> mb_textured_sss.ply (needs mb_mesh + sss_mosaic) -->
+         Los productos se agrupan por tipo dentro de output_dir (ver results/README.md):
+           enable_mb_cloud       -> pointcloud/mb_pointcloud.xyz + tif/mb_pointcloud.tif
+                                    + images/mb_pointcloud.jpg + mesh/mb_mesh.ply
+           enable_mb_intensity   -> tif/mb_intensity.tif (paleta viridis)
+                                    + images/mb_intensity.jpg + pointcloud/mb_intensity.xyz
+           enable_sss_mosaic     -> tif/sss_mosaic.tif
+           enable_sss_waterfall  -> images/sss_waterfall.png
+           enable_mosaic_fusion  -> tif/mb_sss_mosaic.tif (needs mb_intensity + sss_mosaic)
+           enable_fusion         -> mesh/mb_textured_sss.ply (needs mb_mesh + sss_mosaic) -->
 
     <!-- Bags and output -->
-    <arg name="mb_bagfile"  default="/home/uib/bagfiles/cabrera/2025_10_28/14_44_35/sparus2_multibeam_2025-10-28-14-44-35_0.bag"/>
-    <arg name="sss_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/10_56_48/sparus2_sidescan_2025-10-28-10-56-48_0.bag"/>
+    <!-- Andratx -->
+    <!-- classical lawnmower -->
+    <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/13_52_22/sparus2_multibeam_2026-07-02-11-52-22_0.bag"/>
+    <!-- octogon -->
+    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/12_52_41/sparus2_multibeam_2026-07-02-10-52-41_0.bag"/> -->
+    <!-- sss -->
+    <arg name="sss_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/10_44_27/sparus2_sidescan_2026-07-02-08-44-27_0.bag"/>
+    
+
+
+    <!-- <arg name="mb_bagfile"  default="/home/uib/bagfiles/cabrera/2025_10_28/14_44_35/sparus2_multibeam_2025-10-28-14-44-35_0.bag"/>-->
+    <!--<arg name="sss_bagfile" default="/home/uib/bagfiles/cabrera/2025_10_28/10_56_48/sparus2_sidescan_2025-10-28-10-56-48_0.bag"/> -->
     <arg name="output_dir"  default="/home/uib/derelictes_ws/src/acoustic_postprocessing/results/"/>
 
     <!-- Product selection -->
@@ -22,14 +35,76 @@
     <arg name="enable_fusion"        default="true"/>
 
     <!-- Multibeam cloud/mesh params -->
-    <arg name="voxel_size"   default="0.01"/>
+    <!-- voxel_size 0.05 (era 0.01): a 1 cm la nube tenía ~31 M puntos, el SOR y el
+         Poisson depth=11 consumían 55 GB y el nodo moría por OOM sin generar malla.
+         0.05 m deja ~1-3 M puntos, sobra para batimetría del fondo. -->
+    <arg name="voxel_size"   default="0.05"/>
     <arg name="sor_k"        default="50"/>
     <arg name="sor_std"      default="1.0"/>
-    <arg name="angle_cutoff" default="60.0"/>
+    <!-- angle_cutoff 55 (era 60): los haces >55° del nadir son rasantes y ruidosos
+         (curl del borde de la franja ~+0.14 m a 50-60°); recortarlos limpia las
+         "montañas" espurias de la nube sin perder cobertura útil. -->
+    <arg name="angle_cutoff" default="55.0"/>
+    <!-- Frame en el que se mide angle_cutoff. 'sensor' era el comportamiento viejo:
+         medía el ángulo del haz respecto a la vertical DEL SENSOR, antes de aplicar
+         roll/pitch. Con el vehículo alabeado eso deja pasar haces mucho más rasantes
+         de lo que el umbral promete (roll 10° + cutoff 55° -> 65° reales). Medido en
+         13_52_22: 548.600 pts (2.26%) superaban los 55° REALES pese a pasar el cutoff,
+         con tasa de error 13.6%; los que pasaban de 60° reales, 47.4%. 'world' mide
+         tras rotar, así que el cutoff significa lo que dice. -->
+    <arg name="angle_cutoff_frame" default="world"/>
+
+    <!-- ============== Gating por ACTITUD (descarte de virajes) ==============
+         En viraje la franja se proyecta como un abanico inclinado que no casa con las
+         pasadas vecinas. No hay corrección geométrica a posteriori sin registrar
+         franjas (eso es el SLAM), así que se descarta el ping ENTERO.
+
+         Medido sobre el bag 13_52_22 (lawnmower), fracción de puntos que caen fuera de
+         la superficie de referencia:
+             |roll-sesgo| <1°: 2.1%   3-5°: 13.1%   8-12°: 26.3%   >12°: 33.7%
+             |yaw_rate| <1°/s: 2.4%   6-10°/s: 10.4%   10-15°/s: 17.9%
+         El roll es el mejor predictor (Pearson +0.54 con |roll-sesgo|; +0.41 con
+         yaw-rate; +0.10 con pitch — el pitch aquí es sesgo de vuelo, no señal de giro).
+
+         ALCANCE REAL: los pings con actitud extrema son POCOS, así que el gate tiene
+         poca palanca. Con los defaults (roll 5°, yaw-rate 8°/s) se descarta ~7% de los
+         puntos y se elimina ~30% de los malos; el 70% restante viene de pings con
+         actitud nominal y lo sigue cazando surface_relative_filter. Bajar max_roll_deg
+         a 3° sube al ~28% de malos eliminados por ese gate solo, a costa de cobertura.
+
+         roll_bias_deg: sesgo de trim del roll. NaN = estimarlo como la mediana del roll
+         del bag (~+2° en estos). El gate umbrala la EXCURSIÓN respecto al sesgo, no el
+         roll absoluto: un roll constante lo modela bien la matriz de rotación y no
+         estropea la proyección. Cualquier umbral <=0 desactiva ese gate. -->
+    <arg name="max_roll_deg"       default="5.0"/>
+    <arg name="max_yaw_rate_deg_s" default="8.0"/>
+    <arg name="roll_bias_deg"      default="NaN"/>
+
+    <!-- Filtro de outliers RELATIVO A LA SUPERFICIE (no k-NN): quita los picos
+         verticales de haces con rango erróneo / curl de bordes que el SOR no caza y
+         que producen las montañas y radios espurios que se ven en CloudCompare.
+         Descarta puntos cuya Z se aparta > nmad*MAD de la mediana de su celda XY
+         (adaptativo: respeta el relieve rocoso real). nmad<=0 lo desactiva. -->
+    <arg name="surf_filter_cell"  default="0.5"/>
+    <arg name="surf_filter_nmad"  default="3.0"/>
+    <arg name="surf_filter_floor" default="0.3"/>
+    <arg name="surf_filter_iters" default="2"/>
+    <!-- Profundidad de la reconstrucción Poisson. depth 11 dispara la RAM; a
+         voxel 0.05 m, depth 10 da resolución de sobra sin reventar memoria. -->
+    <arg name="poisson_depth" default="10"/>
+    <!-- Resolución (m/celda) del DEM batimétrico rasterizado (mb_pointcloud.tif). -->
+    <arg name="dem_res" default="0.10"/>
+    <!-- Offset extra Y del lever-arm MB->SSS (ajuste empírico para cuadrar con el
+         mosaico SSS). Debe ser igual en cloud e intensity. 0 = sin corrimiento. -->
+    <arg name="mb_sss_extra_offset_y" default="-2.0"/>
 
     <!-- Multibeam intensity params -->
     <arg name="mb_intensity_res"   default="0.10"/>
     <arg name="mb_intensity_cloud" default="true"/>
+    <!-- Corrección AVG (Angle Varying Gain): quita el banding por ángulo de
+         incidencia del backscatter. Sin ella el mosaico salía bimodal (~53% de
+         píxeles casi negros). Portada del SLAM. -->
+    <arg name="mb_apply_avg"       default="true"/>
 
     <!-- Mosaic fusion mode: max | mean | mb | sss -->
     <arg name="mosaic_fusion_mode" default="max"/>
@@ -49,6 +124,17 @@
             <param name="sor_k"        value="$(arg sor_k)"/>
             <param name="sor_std"      value="$(arg sor_std)"/>
             <param name="angle_cutoff" value="$(arg angle_cutoff)"/>
+            <param name="angle_cutoff_frame"  value="$(arg angle_cutoff_frame)"/>
+            <param name="max_roll_deg"        value="$(arg max_roll_deg)"/>
+            <param name="max_yaw_rate_deg_s"  value="$(arg max_yaw_rate_deg_s)"/>
+            <param name="roll_bias_deg"       value="$(arg roll_bias_deg)"/>
+            <param name="poisson_depth" value="$(arg poisson_depth)"/>
+            <param name="dem_res"      value="$(arg dem_res)"/>
+            <param name="surf_filter_cell"  value="$(arg surf_filter_cell)"/>
+            <param name="surf_filter_nmad"  value="$(arg surf_filter_nmad)"/>
+            <param name="surf_filter_floor" value="$(arg surf_filter_floor)"/>
+            <param name="surf_filter_iters" value="$(arg surf_filter_iters)"/>
+            <param name="mb_sss_extra_offset_y" value="$(arg mb_sss_extra_offset_y)"/>
         </node>
     </group>
 
@@ -61,7 +147,13 @@
             <param name="output_dir"   value="$(arg output_dir)"/>
             <param name="mosaic_res"   value="$(arg mb_intensity_res)"/>
             <param name="angle_cutoff" value="$(arg angle_cutoff)"/>
+            <param name="angle_cutoff_frame"  value="$(arg angle_cutoff_frame)"/>
+            <param name="max_roll_deg"        value="$(arg max_roll_deg)"/>
+            <param name="max_yaw_rate_deg_s"  value="$(arg max_yaw_rate_deg_s)"/>
+            <param name="roll_bias_deg"       value="$(arg roll_bias_deg)"/>
             <param name="save_cloud"   value="$(arg mb_intensity_cloud)"/>
+            <param name="apply_avg"    value="$(arg mb_apply_avg)"/>
+            <param name="mb_sss_extra_offset_y" value="$(arg mb_sss_extra_offset_y)"/>
         </node>
     </group>
 
@@ -85,8 +177,8 @@
     <!-- Fuse MB backscatter mosaic + SSS mosaic -->
     <group if="$(arg enable_mosaic_fusion)">
         <node pkg="acoustic_postprocessing" type="mb_sss_mosaic_fusion.py" name="mosaic_fusion" output="screen">
-            <param name="mb_tif"     value="$(arg output_dir)/mb_intensity.tif"/>
-            <param name="sss_tif"    value="$(arg output_dir)/sss_mosaic.tif"/>
+            <param name="mb_tif"     value="$(arg output_dir)/tif/mb_intensity.tif"/>
+            <param name="sss_tif"    value="$(arg output_dir)/tif/sss_mosaic.tif"/>
             <param name="output_dir" value="$(arg output_dir)"/>
             <param name="mode"       value="$(arg mosaic_fusion_mode)"/>
         </node>
@@ -95,8 +187,8 @@
     <!-- Texture MB mesh (geometry) with SSS mosaic (intensity) -->
     <group if="$(arg enable_fusion)">
         <node pkg="acoustic_postprocessing" type="sss_mb_fusion.py" name="fusion_node" output="screen">
-            <param name="mesh_file"  value="$(arg output_dir)/mb_mesh.ply"/>
-            <param name="sss_tif"    value="$(arg output_dir)/sss_mosaic.tif"/>
+            <param name="mesh_file"  value="$(arg output_dir)/mesh/mb_mesh.ply"/>
+            <param name="sss_tif"    value="$(arg output_dir)/tif/sss_mosaic.tif"/>
             <param name="output_dir" value="$(arg output_dir)"/>
         </node>
     </group>

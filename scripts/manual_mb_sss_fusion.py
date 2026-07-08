@@ -13,9 +13,10 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 # Paths and config
-MESH_FILE = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/mb_mesh.ply"
-SSS_TIF   = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/sss_mosaic.tif"
-OUTPUT_MESH = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results/fused_data.ply"
+RESULTS = "/home/uib/derelictes_ws/src/acoustic_postprocessing/results"
+MESH_FILE = f"{RESULTS}/mesh/mb_mesh.ply"
+SSS_TIF   = f"{RESULTS}/tif/sss_mosaic.tif"
+OUTPUT_MESH = f"{RESULTS}/mesh/fused_data.ply"
 
 COLORMAP = cm.viridis     # gray, viridis, inferno, etc.
 NODATA_VALUE = 0

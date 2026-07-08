@@ -66,7 +66,10 @@ def main():
     mode       = rospy.get_param('~mode', 'max')   # max | mean | mb | sss
     timeout    = rospy.get_param('~wait_timeout', 600.0)
 
-    out_tif = os.path.join(output_dir, 'mb_sss_mosaic.tif')
+    tif_dir = os.path.join(output_dir, 'tif')
+    os.makedirs(tif_dir, exist_ok=True)
+
+    out_tif = os.path.join(tif_dir, 'mb_sss_mosaic.tif')
 
     # Wait for both producers to finish (signals guarantee the .tif are fully
     # written). Falls back to files on disk on timeout. Wall-clock based, so it
