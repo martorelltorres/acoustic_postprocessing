@@ -5,8 +5,8 @@ Same geometry as multibeam_processor.py (axis flip, sensor TF, MB->SSS
 lever-arm), so outputs share the UTM frame and fuse with the other products.
 
 Outputs:
-  - tif/mb_intensity.tif        : top-down backscatter mosaic (GeoTIFF, UTM, paleta viridis)
-  - images/mb_intensity.jpg     : el mismo mosaico como JPG
+  - tif/mb_intensity.tif        : top-down backscatter mosaic (GeoTIFF, UTM, viridis palette)
+  - images/mb_intensity.jpg     : the same mosaic as a JPG
   - pointcloud/mb_intensity.xyz : cloud "X Y Z I" (UTM, raw intensity)
 
 Author: Antoni Martorell (SRV, UIB)
@@ -61,19 +61,18 @@ def enhance_data(img_input):
 
 
 def viridis_colormap():
-    """Tabla de color 0-255 -> RGBA para embeber en el GeoTIFF.
+    """0-255 -> RGBA color table to embed in the GeoTIFF.
 
-    Es la MISMA rampa que el JPG (cv2.COLORMAP_VIRIDIS), así que .tif y .jpg se ven
-    idénticos. Se embebe como paleta en vez de escribir 3 bandas RGB a propósito: el
-    .tif sigue siendo 1 banda con el VALOR de backscatter, que es lo que necesita
-    mb_sss_mosaic_fusion.py (hace src.read(1) y fusiona valores, no canales). Con RGB
-    leería el canal rojo del viridis como si fuera intensidad. QGIS/GDAL y la mayoría
-    de visores respetan la paleta y lo pintan en color.
+    Same ramp as the JPG (cv2.COLORMAP_VIRIDIS), so .tif and .jpg look identical. It is
+    embedded as a palette rather than written as 3 RGB bands on purpose: the .tif stays
+    a single band holding the backscatter VALUE, which is what mb_sss_mosaic_fusion.py
+    needs (it does src.read(1) and fuses values, not channels). With RGB it would read
+    viridis' red channel as intensity. QGIS/GDAL honour the palette and show it in color.
     """
     ramp = np.arange(256, dtype=np.uint8).reshape(256, 1)
     bgr = cv2.applyColorMap(ramp, cv2.COLORMAP_VIRIDIS).reshape(256, 3)
     cmap = {i: (int(px[2]), int(px[1]), int(px[0]), 255) for i, px in enumerate(bgr)}
-    cmap[0] = (0, 0, 0, 0)   # 0 = nodata -> transparente (ver la nota del nodata en main)
+    cmap[0] = (0, 0, 0, 0)   # 0 = nodata -> transparent (see the nodata note in main)
     return cmap
 
 
@@ -123,20 +122,20 @@ def main():
     mosaic_res       = rospy.get_param('~mosaic_res', 0.10)
     angle_cutoff_deg = rospy.get_param('~angle_cutoff', 60.0)
     save_cloud       = rospy.get_param('~save_cloud', True)
-    apply_avg        = rospy.get_param('~apply_avg', True)   # corrección AVG por ángulo
-    # Gating por ACTITUD: idéntico a multibeam_processor.py (mismos args del launch).
-    # Ver allí la nota larga. <=0 desactiva cada gate.
+    apply_avg        = rospy.get_param('~apply_avg', True)   # angle-varying gain correction
+    # ATTITUDE gating: identical to multibeam_processor.py (same launch args); see the
+    # long note there. <=0 disables each gate.
     max_roll_deg       = float(rospy.get_param('~max_roll_deg', 5.0))
     max_yaw_rate_dps   = float(rospy.get_param('~max_yaw_rate_deg_s', 8.0))
-    # OJO al float(): roslaunch entrega "NaN" como STRING (ver multibeam_processor.py).
+    # float() is required: roslaunch delivers "NaN" as a STRING (see multibeam_processor.py).
     roll_bias_deg      = float(rospy.get_param('~roll_bias_deg', float('nan')))
     angle_cutoff_frame = str(rospy.get_param('~angle_cutoff_frame', 'world')).lower()
 
     if angle_cutoff_frame not in ('sensor', 'world'):
-        rospy.logwarn(f"angle_cutoff_frame='{angle_cutoff_frame}' no válido; uso 'world'.")
+        rospy.logwarn(f"angle_cutoff_frame='{angle_cutoff_frame}' invalid; using 'world'.")
         angle_cutoff_frame = 'world'
 
-    # Layout de results/: cada producto en su carpeta. Ver results/README.md.
+    # results/ layout: one folder per product. See results/README.md.
     tif_dir    = os.path.join(output_dir, "tif")
     images_dir = os.path.join(output_dir, "images")
     cloud_dir  = os.path.join(output_dir, "pointcloud")
@@ -165,10 +164,8 @@ def main():
     R_sensor = T_MB[:3, :3]
     sensor_offset = T_MB[:3, 3]
 
-    # Lever-arm MB->SSS. El offset extra en Y (por defecto -2 m, ajuste empírico
-    # para cuadrar con el mosaico SSS) se parametriza en vez de hardcodearse: debe
-    # coincidir con el de multibeam_processor.py para que nube y mosaico compartan
-    # marco. Ver la nota en multibeam_processor.py.
+    # MB->SSS lever-arm. The extra Y offset (empirical, -2 m) is a parameter and must
+    # match multibeam_processor.py, or cloud and mosaic stop sharing a frame.
     sss_center = 0.5 * (T_PORT[:3, 3] + T_STBD[:3, 3])
     mb_sss_extra_offset = float(rospy.get_param('~mb_sss_extra_offset_y', -2.0))
     delta_sensor = (sss_center - sensor_offset) + np.array([0.0, mb_sss_extra_offset, 0.0])
@@ -198,7 +195,7 @@ def main():
     f_p = interp1d(ts_nav, np.unwrap(np.array(pitch)), bounds_error=False, fill_value=np.nan)
     f_r = interp1d(ts_nav, np.unwrap(np.array(roll)),  bounds_error=False, fill_value=np.nan)
 
-    # Yaw-rate y sesgo de roll para el gate de actitud (ver multibeam_processor.py).
+    # Yaw-rate and roll bias for the attitude gate (see multibeam_processor.py).
     yaw_rate_dps = np.degrees(
         np.gradient(yaw_unwrapped) / np.maximum(np.gradient(ts_nav), 1e-3)
     )
@@ -208,8 +205,8 @@ def main():
         roll_bias_deg = float(np.degrees(np.median(np.array(roll))))
 
     rospy.loginfo(
-        f"Actitud: sesgo roll {roll_bias_deg:+.2f}° | gate |roll-sesgo|<={max_roll_deg}° "
-        f"y |yaw_rate|<={max_yaw_rate_dps}°/s | cutoff {angle_cutoff_deg}° (frame {angle_cutoff_frame})"
+        f"Attitude: roll bias {roll_bias_deg:+.2f}° | gate |roll-bias|<={max_roll_deg}° "
+        f"and |yaw_rate|<={max_yaw_rate_dps}°/s | cutoff {angle_cutoff_deg}° (frame {angle_cutoff_frame})"
     )
 
     # Per-ping processing: sensor frame -> vehicle -> local -> UTM
@@ -217,7 +214,7 @@ def main():
 
     pts_buffer = []   # (N,3) UTM
     int_buffer = []   # (N,)  raw intensity
-    ang_buffer = []   # (N,)  ángulo de incidencia (para la corrección AVG)
+    ang_buffer = []   # (N,)  incidence angle (for the AVG correction)
     count = 0
     n_skip_roll = 0
     n_skip_yaw = 0
@@ -241,7 +238,7 @@ def main():
         if np.isnan(n) or np.isnan(e) or np.isnan(yaw_t):
             continue
 
-        # Gate por actitud (ping entero). Mismos umbrales que la nube batimétrica.
+        # Attitude gate (whole ping). Same thresholds as the bathymetric cloud.
         if max_roll_deg > 0 and abs(np.degrees(roll_t) - roll_bias_deg) > max_roll_deg:
             n_skip_roll += 1
             continue
@@ -262,7 +259,7 @@ def main():
         # Same axis convention as multibeam_processor.py
         xyz = np.column_stack((pc['x'], -pc['y'], -pc['z'])).astype(np.float64)
 
-        # Ángulo del haz respecto a la vertical DEL SENSOR.
+        # Beam angle from the SENSOR vertical.
         ang_sensor = np.degrees(np.arctan2(
             np.sqrt(xyz[:, 0] ** 2 + xyz[:, 1] ** 2),
             np.abs(xyz[:, 2])
@@ -275,24 +272,22 @@ def main():
         R_veh = tr.euler_matrix(roll_t, pitch_t, yaw_t, axes='sxyz')[:3, :3]
         xyz = xyz @ R_veh.T
 
-        # Ángulo respecto a la vertical REAL, ya con roll/pitch aplicados. Ver la nota
-        # en multibeam_processor.py: en frame sensor el cutoff deja pasar haces que
-        # apuntan mucho más rasantes de lo que el umbral promete.
+        # Angle from the TRUE vertical, with roll/pitch applied. See multibeam_processor.py:
+        # in sensor frame the cutoff lets through beams far more grazing than promised.
         ang_world = np.degrees(np.arctan2(
             np.sqrt(xyz[:, 0] ** 2 + xyz[:, 1] ** 2),
             np.abs(xyz[:, 2])
         ))
 
-        # El AVG se bina con el MISMO ángulo con el que se recorta. En frame mundo eso
-        # es el ángulo de incidencia sobre fondo plano, que es la variable física de la
-        # que depende el backscatter; el ángulo de haz en frame sensor solo coincide con
-        # ella cuando el roll es cero (aquí difieren p90=5.4°, y el AVG bina a 2°).
+        # AVG bins on the SAME angle used for the cutoff. In world frame that is the
+        # incidence angle on flat bottom, which is the physical variable backscatter
+        # depends on; the sensor-frame beam angle only matches it at zero roll.
         angles = ang_world if angle_cutoff_frame == 'world' else ang_sensor
         keep = angles < angle_cutoff_deg
 
         xyz = xyz[keep]
         intensity = intensity[keep]
-        ang_keep = angles[keep]     # ángulo de incidencia por punto (para AVG)
+        ang_keep = angles[keep]     # per-point incidence angle (for AVG)
         if len(xyz) < 10:
             continue
 
@@ -330,24 +325,24 @@ def main():
     ang_all = np.concatenate(ang_buffer)
 
     rospy.loginfo(
-        f"Pings: {count} leídos, {n_skip_roll} descartados por roll, "
-        f"{n_skip_yaw} por yaw-rate ({(n_skip_roll + n_skip_yaw) / max(count, 1) * 100:.2f}% "
-        f"descartado por actitud)"
+        f"Pings: {count} read, {n_skip_roll} dropped by roll, "
+        f"{n_skip_yaw} by yaw-rate ({(n_skip_roll + n_skip_yaw) / max(count, 1) * 100:.2f}% "
+        f"dropped by attitude)"
     )
     rospy.loginfo(f"Total intensity points: {len(pts_all)}")
 
     # =====================================================================
-    # CORRECCIÓN AVG (Angle Varying Gain) — portada del SLAM
+    # AVG (Angle Varying Gain) correction — ported from the SLAM
     # =====================================================================
-    # El backscatter del MBES está dominado por el ángulo de incidencia: forma
-    # de campana, brillante cerca del nadir y oscuro en los haces rasantes. Ese
-    # banding va con la pose del vehículo, no con el fondo, y arruina el mosaico
-    # (la distribución de intensidad quedaba bimodal: ~53% de píxeles casi negros).
+    # MBES backscatter is dominated by the incidence angle: a bell shape, bright near
+    # nadir and dark on the grazing beams. That banding follows the vehicle pose rather
+    # than the seafloor and ruins the mosaic (intensity came out bimodal, ~53% of pixels
+    # nearly black).
     #
-    # Perfil = MEDIANA de intensidad por bin angular (robusto a la estructura del
-    # fondo y a outliers). Luego  I_corr = I / gain(angulo), que deja la intensidad
-    # ~1 de media a cualquier ángulo y conserva solo la textura real del fondo
-    # (firma sedimento/roca). Reduce el banding ~99%.
+    # Profile = MEDIAN intensity per angular bin (robust to seafloor structure and to
+    # outliers). Then I_corr = I / gain(angle), which flattens the mean intensity across
+    # angles and keeps only the real bottom texture (sediment/rock signature). Cuts the
+    # banding by ~99%.
     if apply_avg:
         bins = np.arange(0.0, angle_cutoff_deg + 1.0, 2.0)
         centers = (bins[:-1] + bins[1:]) / 2.0
@@ -361,16 +356,16 @@ def main():
         if valid_bins.sum() >= 3:
             gain_v = np.maximum(gain[valid_bins], 1e-3)
             centers_v = centers[valid_bins]
-            # Ganancia interpolada por punto y normalizada a la mediana global,
-            # para no cambiar la escala absoluta del backscatter.
+            # Per-point gain, interpolated and renormalized to the global median so the
+            # absolute backscatter scale is preserved.
             g_pts = np.interp(ang_all, centers_v, gain_v)
             int_all = int_all / np.maximum(g_pts, 1e-3) * float(np.median(gain_v))
             rospy.loginfo(
-                f"AVG aplicado: ganancia {gain_v.min():.1f}-{gain_v.max():.1f} "
-                f"(swing {gain_v.max() - gain_v.min():.1f}) sobre {valid_bins.sum()} bins"
+                f"AVG applied: gain {gain_v.min():.1f}-{gain_v.max():.1f} "
+                f"(swing {gain_v.max() - gain_v.min():.1f}) over {valid_bins.sum()} bins"
             )
         else:
-            rospy.logwarn("AVG: pocos bins válidos; mosaico sin corregir.")
+            rospy.logwarn("AVG: too few valid bins; mosaic left uncorrected.")
 
     # Point cloud "X Y Z I"
     if save_cloud:
@@ -379,10 +374,9 @@ def main():
         np.savetxt(xyz_file, out, fmt="%.4f %.4f %.4f %.4f")
         rospy.loginfo(f"Intensity cloud saved: {xyz_file}")
 
-    # Georeferenced backscatter mosaic: MEDIANA de intensidad por celda.
-    # (Antes se usaba la media, sensible a outliers de backscatter — un solo
-    #  retorno especular disparaba la celda. La mediana por celda es robusta y,
-    #  combinada con la corrección AVG, da un mosaico con textura de fondo real.)
+    # Georeferenced backscatter mosaic: MEDIAN intensity per cell. The mean was
+    # sensitive to backscatter outliers (a single specular return blew up the cell);
+    # the median plus the AVG correction gives real bottom texture.
     margin = 2.0
     x_min = pts_all[:, 0].min() - margin
     x_max = pts_all[:, 0].max() + margin
@@ -399,7 +393,7 @@ def main():
     cell = r[mask] * width + c[mask]
     vals = int_all[mask].astype(np.float64)
 
-    # Mediana por celda vía groupby con ordenación (vectorizado, sin bucle por punto).
+    # Per-cell median via a sort-based groupby (vectorized, no per-point loop).
     order = np.argsort(cell, kind="stable")
     cell_s = cell[order]
     vals_s = vals[order]
@@ -411,12 +405,11 @@ def main():
 
     img8 = enhance_data(img)
 
-    # El CLAHE de enhance_data levanta el fondo vacío de 0 a ~4, así que el 0 deja de
-    # significar "sin dato": el histograma del .tif salía con mediana 4 y media 60, que
-    # es el falso "mosaico bimodal casi-negro" (la mediana medía el FONDO, no el fondo
-    # marino). Reservamos el 0 para nodata: las celdas sin dato vuelven a 0 y las que
-    # tienen dato se fuerzan a >=1. mb_sss_mosaic_fusion.py ya usa `mb_g > 0` como
-    # máscara de validez, así que esto es justo lo que espera.
+    # enhance_data's CLAHE lifts the empty background from 0 to ~4, so 0 would stop
+    # meaning "no data" (the .tif histogram came out with median 4 and mean 60 — the fake
+    # "almost-black bimodal mosaic", where the median was measuring the BACKGROUND, not
+    # the seafloor). 0 is reserved for nodata: empty cells go back to 0 and filled ones
+    # are forced to >=1, which is what mb_sss_mosaic_fusion.py expects from `mb_g > 0`.
     filled = img > 0
     img8[filled] = np.maximum(img8[filled], 1)
     img8[~filled] = 0
@@ -432,17 +425,17 @@ def main():
         photometric='palette', nodata=0
     ) as dst:
         dst.write(img8, 1)
-        # Paleta viridis embebida: mantiene los colores del JPG sin dejar de ser
-        # 1 banda de backscatter. Ver viridis_colormap().
+        # Embedded viridis palette: keeps the JPG colors while staying a single
+        # backscatter band. See viridis_colormap().
         dst.write_colormap(1, viridis_colormap())
 
-    rospy.loginfo(f"Backscatter mosaic saved (paleta viridis): {tif_file}")
+    rospy.loginfo(f"Backscatter mosaic saved (viridis palette): {tif_file}")
 
-    # JPG del mosaico (visualización) en results/images/. Se aplica un mapa de
-    # color para que la textura del backscatter se lea mejor que en gris plano.
+    # Mosaic JPG for visualization. A colormap is applied so the backscatter texture
+    # reads better than in flat gray.
     jpg_file = os.path.join(images_dir, "mb_intensity.jpg")
     color = cv2.applyColorMap(img8, cv2.COLORMAP_VIRIDIS)
-    color[~filled] = 0      # nodata en negro, no en el morado oscuro del viridis
+    color[~filled] = 0      # nodata in black, not in viridis' dark purple
     cv2.imwrite(jpg_file, color, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
     rospy.loginfo(f"Backscatter JPG saved: {jpg_file}")
 

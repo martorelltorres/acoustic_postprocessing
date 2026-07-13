@@ -1,39 +1,37 @@
 #!/usr/bin/env python3
 """
-Genera material de divulgación (redes sociales) a partir de results/.
+Builds outreach material (social media) from results/.
 
-Salidas en results/media/:
-  01_bathymetry.png     batimetría sombreada + trayectoria del AUV
-  02_backscatter.png    backscatter multihaz + trayectoria
-  03_sss_mosaic.png     mosaico sidescan + trayectoria
-  04_survey_reveal.gif  la trayectoria se dibuja sobre la batimetría
-  05_relief_lightsweep.gif  el sol gira sobre el DEM y revela el microrrelieve
-  06_two_surveys.png    las dos misiones (MB y SSS) en el mismo marco UTM
-  08_layer_stack.png    pila 3D esquemática (5 capas): trayectoria / SSS / multihaz /
-                        marco vacío de cámaras estéreo (siguiente paso) / fondo marino
-                        sintético (roca·arena·posidonia). Cada dato llena el ancho.
-  09_octagon_vs_lawnmower.png  por qué los octágonos anidados baten al lawnmower
-                        clásico. Dos pilas 3D: arriba el patrón que vuela el AUV
-                        (lawnmower CON cross-tracks, para que también tenga cierres
-                        de bucle) y debajo el fotomosaico que salió de esa misma
-                        área. El argumento: giros de 90° vs 45° y deriva del INS.
-                        Usa la trayectoria REAL de Andratx (multibeam_SLAM) y los
-                        mosaicos de results/media/mosaics/.
+Outputs in results/media/:
+  01_bathymetry.png     shaded bathymetry + AUV track
+  02_backscatter.png    multibeam backscatter + track
+  03_sss_mosaic.png     sidescan mosaic + track
+  04_survey_reveal.gif  the track draws itself over the bathymetry
+  05_relief_lightsweep.gif  the sun orbits the DEM and reveals the micro-relief
+  06_two_surveys.png    both missions (MB and SSS) in the same UTM frame
+  08_layer_stack.png    schematic 3D stack (5 layers): track / SSS / multibeam / stereo
+                        photomosaic (mosaics/lawnmower.png) / synthetic seafloor
+                        (rock, sand, posidonia). Each dataset fills the width.
+  09_octagon_vs_lawnmower.png  why nested octagons beat the classic lawnmower. Two 3D
+                        stacks: on top the pattern the AUV flies (the lawnmower WITH
+                        cross-tracks, so that it gets loop closures too), below the
+                        photomosaic that came out of that same area. The argument:
+                        90° vs 45° turns and INS drift. Uses the REAL Andratx track
+                        (multibeam_SLAM) and the mosaics in results/media/mosaics/.
 
-Uso:  python3 make_media.py [results_dir]
+Usage:  python3 make_media.py [results_dir]
 
-DECISIONES DE COLOR (no son estéticas, están medidas):
-  - Profundidad y backscatter son MAGNITUD -> rampa secuencial de UN solo tono.
-    Nada de `turbo`/`viridis` aquí: un arcoíris inventa fronteras que no están en
-    el dato. La profundidad va en la rampa azul (claro=somero -> oscuro=profundo) y
-    el backscatter en gris neutro (claro=duro/reflectante), que es la convención sónar.
-  - Las dos trayectorias son IDENTIDAD -> dos tonos categóricos. Naranja (#d95926) y
-    magenta (#d55181): peor par bajo protanopia/deuteranopia dE=48.8 (umbral 12), y
-    contraste >=3:1 contra el azul más profundo del mapa y contra el negro. La pareja
-    naranja+amarillo, que era la bonita, se queda en dE=11.4 y no pasa.
-  - Cada traza lleva funda oscura (casing) porque cruza zonas claras y oscuras del
-    mapa, y va etiquetada directamente además de en la leyenda: la identidad nunca
-    depende solo del color.
+COLOR DECISIONS (measured, not aesthetic):
+  - Depth and backscatter are MAGNITUDE -> single-hue sequential ramp. No `turbo` or
+    `viridis` here: a rainbow invents boundaries the data does not have. Depth uses the
+    blue ramp (light=shallow -> dark=deep) and backscatter neutral gray
+    (light=hard/reflective), which is the sonar convention.
+  - The two tracks are IDENTITY -> two categorical hues. Orange (#d95926) and magenta
+    (#d55181): worst-case dE=48.8 under protanopia/deuteranopia (threshold 12), and >=3:1
+    contrast against both the map's deepest blue and black. The prettier orange+yellow
+    pair only reaches dE=11.4 and fails.
+  - Every track carries a dark casing because it crosses light and dark areas of the map,
+    and is labelled directly as well as in the legend: identity never rests on color alone.
 
 Author: Antoni Martorell (SRV, UIB)
 """
@@ -59,34 +57,34 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── tokens ─────────────────────────────────────────────────────────────────────
-PAGE   = "#0d0d0d"      # plano de página (dark)
-INK    = "#ffffff"      # tinta primaria
-INK2   = "#c3c2b7"      # tinta secundaria
-MUTED  = "#898781"      # ejes / etiquetas
-MB_COL  = "#d95926"     # trayectoria multihaz  (slot naranja, tema oscuro)
-SSS_COL = "#d55181"     # trayectoria sidescan  (slot magenta, tema oscuro)
-STEREO_COL = "#4fb9a6"  # capa "siguiente paso" (teal): distinta de naranja/magenta/azul
-LAWN_COL  = "#828a94"   # lawnmower (línea base neutra)
-OCT_COL   = "#d55181"   # octágonos (magenta, el patrón que se realza)
-CROSS_COL = "#f4c94b"   # ámbar: auto-cruces = cierres de bucle
-TURN_COL  = "#e0554e"   # rojo: giros de 90° = donde el INS inyecta deriva
+PAGE   = "#0d0d0d"      # page plane (dark)
+INK    = "#ffffff"      # primary ink
+INK2   = "#c3c2b7"      # secondary ink
+MUTED  = "#898781"      # axes / labels
+MB_COL  = "#d95926"     # multibeam track  (orange slot, dark theme)
+SSS_COL = "#d55181"     # sidescan track   (magenta slot, dark theme)
+STEREO_COL = "#4fb9a6"  # "next step" layer (teal): distinct from orange/magenta/blue
+LAWN_COL  = "#828a94"   # lawnmower (neutral baseline)
+OCT_COL   = "#d55181"   # octagons (magenta, the pattern being highlighted)
+CROSS_COL = "#f4c94b"   # amber: self-crossings = loop closures
+TURN_COL  = "#e0554e"   # red: 90° turns = where the INS injects drift
 
-# Trayectoria REAL de octágonos (misión Andratx 3 m) que vive en el paquete SLAM.
+# REAL octagon track (Andratx 3 m mission), which lives in the SLAM package.
 SLAM_TRAJ = os.path.join(PKG_ROOT, "..", "multibeam_SLAM", "results", "raw_trajectory.npy")
 
-# Rampa secuencial azul (steps 100..700 de la paleta de referencia)
+# Blue sequential ramp (steps 100..700 of the reference palette)
 DEPTH_STEPS = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec",
                "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab",
                "#184f95", "#104281", "#0d366b"]
-CMAP_DEPTH = LinearSegmentedColormap.from_list("depth", DEPTH_STEPS[::-1])  # profundo=oscuro
+CMAP_DEPTH = LinearSegmentedColormap.from_list("depth", DEPTH_STEPS[::-1])  # deep=dark
 CMAP_BS = LinearSegmentedColormap.from_list("bs", ["#0f0f0e", "#4a4a46", "#8f8e86", "#d3d2c9", "#f5f5f1"])
 
 CREDIT = "SPARUS II AUV  ·  Andratx, Mallorca  ·  2 Jul 2026  ·  SRV — UIB"
 
 
-# ── utilidades ─────────────────────────────────────────────────────────────────
+# ── utilities ──────────────────────────────────────────────────────────────────
 def load_raster(path):
-    """Devuelve (array float con NaN en nodata, extent en UTM)."""
+    """Returns (float array with NaN at nodata, extent in UTM)."""
     with rasterio.open(path) as src:
         a = src.read(1).astype(np.float32)
         nod = src.nodata
@@ -100,7 +98,7 @@ def load_raster(path):
 
 
 def crop_to_data(a, extent, pad_px=12):
-    """Recorta al bbox de los píxeles con dato. Los rásters traen mucho vacío."""
+    """Crops to the bbox of the pixels with data. The rasters carry a lot of empty."""
     rows, cols = np.nonzero(np.isfinite(a))
     if rows.size == 0:
         return a, extent
@@ -116,7 +114,7 @@ def crop_to_data(a, extent, pad_px=12):
 
 
 def shade(a, cmap, vert_exag=6.0, azdeg=315, altdeg=45):
-    """Colorea con `cmap` y multiplica por un hillshade. NaN -> transparente."""
+    """Colors with `cmap` and multiplies by a hillshade. NaN -> transparent."""
     finite = np.isfinite(a)
     vmin, vmax = np.nanpercentile(a, (2, 98))
     norm = Normalize(vmin, vmax)
@@ -141,7 +139,7 @@ def frame(figsize=(9, 9)):
 
 
 def titles(fig, title):
-    """Solo un rótulo corto. Sin subtítulo: en redes nadie lo lee y robaba lienzo."""
+    """A short label only. No subtitle: nobody reads it on social media and it stole canvas."""
     fig.text(0.06, 0.945, title, color=INK, fontsize=25, fontweight="bold", va="top")
     fig.text(0.06, 0.028, CREDIT, color=MUTED, fontsize=9.5, va="center")
 
@@ -176,7 +174,7 @@ def north_arrow(ax, extent):
 
 
 def track(ax, x, y, color, label=None, lw=2.0, z=5):
-    """Traza con funda oscura: cruza zonas claras y oscuras del mapa."""
+    """Track with a dark casing: it crosses light and dark areas of the map."""
     ax.plot(x, y, color="#0d0d0d", lw=lw + 1.8, solid_capstyle="round", zorder=z)
     line, = ax.plot(x, y, color=color, lw=lw, solid_capstyle="round", zorder=z + 1,
                     label=label)
@@ -184,12 +182,12 @@ def track(ax, x, y, color, label=None, lw=2.0, z=5):
 
 
 def miles(n):
-    """Separador de millares con espacio fino: 194 046, no 194,046."""
+    """Thousands separator with a thin space: 194 046, not 194,046."""
     return f"{n:,}".replace(",", " ")
 
 
 def colorbar(fig, ax, mappable, label, as_depth=False):
-    # Dentro del eje, no pegada al borde: a 0.945 las etiquetas se salían del lienzo.
+    # Inside the axes, not flush to the edge: at 0.945 the labels ran off the canvas.
     cax = fig.add_axes([0.885, 0.135, 0.016, 0.40])
     cb = fig.colorbar(mappable, cax=cax)
     cb.set_label(label, color=INK2, fontsize=11)
@@ -197,28 +195,28 @@ def colorbar(fig, ax, mappable, label, as_depth=False):
     cb.outline.set_edgecolor("#2c2c2a")
 
     if as_depth:
-        # La Z del DEM es cota negativa. Se etiqueta como PROFUNDIDAD positiva, que es
-        # como se lee un mapa batimétrico, sin tocar el dato ni el sombreado.
+        # The DEM's Z is a negative elevation. It is labelled as positive DEPTH, which is
+        # how a bathymetric map is read, without touching the data or the shading.
         cb.ax.yaxis.set_major_formatter(
             matplotlib.ticker.FuncFormatter(lambda v, _: f"{-v:.0f}")
         )
 
 
-# Sprite del vehículo. El morro es la sección AMARILLA y en el PNG queda a la DERECHA
-# (centroide de píxeles amarillos en x=516 de 647), así que el sprite avanza hacia +x.
+# Vehicle sprite. The nose is the YELLOW section and sits on the RIGHT of the PNG
+# (centroid of yellow pixels at x=516 of 647), so the sprite advances towards +x.
 AUV_PNG = "sparusII.png"
-AUV_LEN_PX = 132          # largo del sprite antes del zoom; se rota, así que conviene holgura
-AUV_ZOOM = 0.36           # ~48 px en el lienzo de 750. Es un ICONO, no está a escala: el
-                          # Sparus II mide 1.6 m, a escala real serían ~20 px e invisible.
+AUV_LEN_PX = 132          # sprite length before zoom; it gets rotated, so leave slack
+AUV_ZOOM = 0.36           # ~48 px on the 750 canvas. It is an ICON, not to scale: the
+                          # Sparus II is 1.6 m, which would be ~20 px and invisible.
 
 
 def load_auv_sprite(path, length_px=AUV_LEN_PX):
-    """PNG del Sparus II -> RGBA con fondo transparente, recortado y escalado.
+    """Sparus II PNG -> RGBA with transparent background, cropped and scaled.
 
-    El PNG viene opaco y con fondo blanco, pero el casco TAMBIÉN es blanco: umbralar
-    "blanco -> transparente" le abre agujeros. Se borra solo el blanco CONECTADO AL
-    BORDE (componentes conexas que tocan el marco), que es el fondo de verdad. Así los
-    16 834 píxeles blancos interiores del casco sobreviven.
+    The PNG is opaque with a white background, but the hull is ALSO white: thresholding
+    "white -> transparent" punches holes in it. Only the white CONNECTED TO THE BORDER
+    (components touching the frame), which is the real background, is erased. That way the
+    16,834 white pixels inside the hull survive.
     """
     a = np.array(Image.open(path).convert("RGBA"))
     rgb = a[:, :, :3].astype(int)
@@ -241,11 +239,11 @@ def load_auv_sprite(path, length_px=AUV_LEN_PX):
 
 
 def auv_rotated(sprite, heading_deg):
-    """Rota el sprite al rumbo, sin dejarlo nunca panza arriba.
+    """Rotates the sprite to the heading, never leaving it belly-up.
 
-    Rotar sin más: con rumbo hacia el oeste el vehículo sale invertido. Si el rumbo
-    apunta a la izquierda se espeja en vertical ANTES de rotar, así el morro sigue el
-    rumbo pero el dorso se queda arriba. Es el truco estándar para sprites de perfil.
+    Rotating naively leaves the vehicle upside down on westward headings. When the heading
+    points left, the sprite is mirrored vertically BEFORE rotating, so the nose follows the
+    heading while the back stays up. The standard trick for side-view sprites.
     """
     im = sprite
     if np.cos(np.radians(heading_deg)) < 0:
@@ -254,7 +252,7 @@ def auv_rotated(sprite, heading_deg):
     return np.array(im.rotate(heading_deg, resample=Image.BICUBIC, expand=True))
 
 
-# ── figuras ────────────────────────────────────────────────────────────────────
+# ── figures ────────────────────────────────────────────────────────────────────
 def fig_bathymetry(res, out, nav):
     dem, ext = crop_to_data(*load_raster(os.path.join(res, "tif", "mb_pointcloud.tif")))
     rgba, norm = shade(dem, CMAP_DEPTH)
@@ -365,9 +363,9 @@ def gif_reveal(res, out, nav, frames=72, fps=18):
     rgba, _ = shade(dem, CMAP_DEPTH)
 
     x, y = nav["xm"], nav["ym"]
-    # Cuántos fixes revela cada fotograma. Se dibuja la polilínea COMPLETA hasta ese
-    # punto: submuestrear la traza (x[::step]) cortaba las esquinas del lawnmower y la
-    # forma no coincidía con la de 01_bathymetry.png.
+    # How many fixes each frame reveals. The FULL polyline up to that point is drawn:
+    # subsampling the track (x[::step]) cut the lawnmower's corners and the shape no longer
+    # matched 01_bathymetry.png.
     cuts = np.linspace(2, len(x), frames).astype(int)
 
     fig, ax = frame(figsize=(7.5, 7.5))
@@ -389,8 +387,8 @@ def gif_reveal(res, out, nav, frames=72, fps=18):
                   va="top", fontweight="bold",
                   path_effects=[withStroke(linewidth=3.2, foreground="#000000")], zorder=8)
 
-    # Rumbo por diferencias sobre una ventana de ~2 s (nav a 20 Hz). Con dos fixes
-    # consecutivos el ruido de navegación hace girar el sprite como una peonza.
+    # Heading by differences over a ~2 s window (nav at 20 Hz). With two consecutive fixes
+    # the navigation noise spins the sprite like a top.
     win = 40
 
     def update(i):
@@ -403,8 +401,8 @@ def gif_reveal(res, out, nav, frames=72, fps=18):
         heading = np.degrees(np.arctan2(dy, dx)) if (dx or dy) else 0.0
 
         imbox.set_data(auv_rotated(sprite, heading))
-        # OJO: AnnotationBbox dibuja la imagen en `xybox`, no en `xy`. Tocando solo `xy`
-        # el sprite se queda clavado en el punto de salida y únicamente gira.
+        # AnnotationBbox draws the image at `xybox`, not at `xy`. Setting only `xy` leaves
+        # the sprite pinned at the start point, merely rotating in place.
         auv.xy = auv.xybox = (x[k - 1], y[k - 1])
 
         hud.set_text(f"t = {nav['tm'][k - 1] - nav['tm'][0]:.0f} s")
@@ -417,12 +415,12 @@ def gif_reveal(res, out, nav, frames=72, fps=18):
 
 
 def gif_lightsweep(res, out, frames=48, fps=16):
-    """El sol gira alrededor del DEM y el relieve aparece y desaparece.
+    """The sun orbits the DEM and the relief appears and disappears.
 
-    Sustituye a un orbit 3D: matplotlib no tiene z-buffer (Poly3DCollection ordena las
-    caras con el algoritmo del pintor), y a ángulos rasantes dibujaba el borde dentado
-    de la franja como estalactitas que no existen. El barrido de luz es 2D, no miente
-    sobre la geometría y enseña el microrrelieve mejor que un giro.
+    A replacement for a 3D orbit: matplotlib has no z-buffer (Poly3DCollection sorts faces
+    with the painter's algorithm) and at grazing angles it drew the jagged swath edge as
+    stalactites that do not exist. The light sweep is 2D, does not lie about the geometry,
+    and shows the micro-relief better than a rotation.
     """
     dem, ext = crop_to_data(*load_raster(os.path.join(res, "tif", "mb_pointcloud.tif")))
 
@@ -459,13 +457,13 @@ def gif_lightsweep(res, out, frames=48, fps=16):
     plt.close(fig)
 
 
-# ── figura 3D: pila de capas por sensor ─────────────────────────────────────────
-# Proyección oblicua (gabinete): un punto (u,v) del plano -> lienzo. NO es 3D métrico
-# (matplotlib no tiene z-buffer; ver gif_lightsweep), es un DIAGRAMA: cada producto es
-# una lámina y el eje v (norte) se va "hacia el fondo" arriba-derecha. Las láminas se
-# apilan por nivel. Mismo truco de skew que el ejemplo "Affine transform of an image".
+# ── 3D figure: per-sensor layer stack ───────────────────────────────────────────
+# Oblique (cabinet) projection: a point (u,v) of the plane -> canvas. This is NOT metric 3D
+# (matplotlib has no z-buffer; see gif_lightsweep), it is a DIAGRAM: each product is a sheet
+# and the v axis (north) recedes up and to the right. Sheets stack by level. Same skew trick
+# as the "Affine transform of an image" example.
 def _raster_rgba(a, cmap, pct=(2, 98)):
-    """Raster de una banda -> RGBA con alfa=finito (NaN transparente)."""
+    """Single-band raster -> RGBA with alpha=finite (NaN transparent)."""
     vmin, vmax = np.nanpercentile(a, pct)
     rgba = cmap(Normalize(vmin, vmax)(a))
     rgba[..., 3] = np.isfinite(a).astype(float)
@@ -473,7 +471,7 @@ def _raster_rgba(a, cmap, pct=(2, 98)):
 
 
 def _fbm(shape, rng, scales, weights):
-    """Ruido fractal: suma de octavas de ruido blanco suavizado. Sale ~N(0,1)."""
+    """Fractal noise: sum of octaves of smoothed white noise. Comes out ~N(0,1)."""
     out = np.zeros(shape, np.float32)
     for sc, w in zip(scales, weights):
         out += w * gaussian_filter(rng.standard_normal(shape).astype(np.float32), sc)
@@ -481,23 +479,23 @@ def _fbm(shape, rng, scales, weights):
 
 
 def _procedural_seafloor(w, h, seed=7):
-    """Fondo marino sintético e ILUSTRATIVO: arena con grano y cáusticas, praderas de
-    posidonia (parches orgánicos oscuros) y rocas con sombreado de hemisferio."""
+    """Synthetic, ILLUSTRATIVE seafloor: grainy sand with caustics, posidonia meadows
+    (dark organic patches) and rocks with hemispheric shading."""
     rng = np.random.default_rng(seed)
     img = np.empty((h, w, 3), np.float32)
 
-    # 1) arena: mezcla claro/oscuro modulada por grano de baja frecuencia
+    # 1) sand: light/dark mix modulated by low-frequency grain
     grain = _fbm((h, w), rng, (1.5, 4.0, 11.0), (0.5, 0.3, 0.2))
     tg = np.clip(0.5 + 0.30 * grain, 0, 1)[..., None]
     img[:] = np.array([0.66, 0.56, 0.39]) * (1 - tg) + np.array([0.86, 0.77, 0.58]) * tg
 
-    # cáusticas: red tenue de luz solar filtrada por el oleaje
+    # caustics: faint net of sunlight filtered through the waves
     caus = _fbm((h, w), rng, (2.2, 5.5), (0.6, 0.4))
     caus = np.clip((caus - 0.35) * 1.7, 0, 1)[..., None]
     img += caus * np.array([0.10, 0.10, 0.07])
 
-    # 2) posidonia: parches grandes y contiguos (baja frecuencia), verde oliva OSCURO
-    # con moteado interno tenue. La posidonia real, cenital, se ve casi negra/marrón.
+    # 2) posidonia: large contiguous patches (low frequency), DARK olive green with faint
+    # internal mottling. Real posidonia from above looks almost black/brown.
     meadow = _fbm((h, w), rng, (14.0, 30.0, 60.0), (0.55, 0.30, 0.15))
     mask = np.clip((meadow - np.percentile(meadow, 58)) / 0.55 + 0.5, 0, 1)
     tex = _fbm((h, w), rng, (0.8, 2.5), (0.6, 0.4))[..., None]
@@ -505,7 +503,7 @@ def _procedural_seafloor(w, h, seed=7):
     m3 = (mask ** 1.35)[..., None]
     img = img * (1 - m3) + pos * m3
 
-    # 3) rocas: elipses con sombreado de hemisferio (luz arriba-izquierda)
+    # 3) rocks: ellipses with hemispheric shading (light from the upper left)
     yy, xx = np.mgrid[0:h, 0:w]
     L = np.array([-0.55, -0.55, 0.63])
     for _ in range(30):
@@ -527,28 +525,81 @@ def _procedural_seafloor(w, h, seed=7):
         rock = np.clip(base[None, None, :] * sh[..., None], 0, 1)
         img[inside] = rock[inside]
 
-    # 4) tinte de columna de agua: leve viraje frío para que lea como fondo sumergido
+    # 4) water-column tint: a slight cool shift so it reads as submerged
     img = img * 0.94 + 0.06 * np.array([0.10, 0.22, 0.24])
     return np.clip(img, 0, 1)
 
 
+def _rot2(theta):
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c, -s], [s, c]])
+
+
+def _raster_data_xy(a, ext, step=6):
+    """World (x, y) of the pixels that carry data, subsampled. Feeds the footprint bbox.
+
+    The extents are axis-aligned boxes around a diagonal strip of data, so they are far too
+    loose to size the sheet with: the strip itself is what has to be measured.
+    """
+    sub = a[::step, ::step]
+    r, c = np.nonzero(np.isfinite(sub))
+    ny, nx = a.shape
+    x = ext[0] + (c * step + 0.5) * (ext[1] - ext[0]) / nx
+    y = ext[3] - (r * step + 0.5) * (ext[3] - ext[2]) / ny
+    return np.column_stack([x, y])
+
+
 def fig_layer_stack(res, out, nav):
-    """Pila 3D: trayectoria / SSS / multihaz / cámaras (TODO) / fondo marino real."""
+    """3D stack: track / SSS / multibeam / stereo photomosaic / real seafloor.
+
+    Every layer shares one rotated survey frame, so the products are co-registered sheet to
+    sheet and the stack reads as a single area sensed four ways.
+    """
     dem, dem_ext = crop_to_data(*load_raster(os.path.join(res, "tif", "mb_pointcloud.tif")))
     sss, sss_ext = crop_to_data(*load_raster(os.path.join(res, "tif", "sss_mosaic.tif")))
-    mb_bb = (nav["xm"].min(), nav["xm"].max(), nav["ym"].min(), nav["ym"].max())
 
-    # Geometría de la proyección oblicua. SX: cizalla; SY: escorzo (a mayor, más recto).
+    # Optical layer: the lawnmower photomosaic, already de-rotated and cropped to its data.
+    # It is a plain PNG with no georeferencing, so it cannot go through the survey frame
+    # below; it is fitted into the footprint rectangle instead. Missing -> the layer falls
+    # back to the empty "next step" frame.
+    mos_png = os.path.join(out, "mosaics", "lawnmower.png")
+    mos = _load_mosaic(mos_png, rot180=True) if os.path.isfile(mos_png) else None
+
+    # ── survey frame: ONE transform for every layer ─────────────────────────────
+    # All four products are drawn through the same world->sheet affine, so a given patch of
+    # seabed lands on the same (u, v) of every sheet and the corner posts tie the SAME
+    # footprint through the stack. That co-registration is the whole point of the figure:
+    # one area, four sensors. Fitting each layer to its own bbox (what this did before) let
+    # them drift apart and silently rescaled each one.
+    #
+    # The frame is rotated so the survey's major axis is horizontal. In raw UTM the
+    # footprint runs diagonally across an axis-aligned sheet, which wastes most of the sheet
+    # on nodata — the data covered barely a third of it.
+    #
+    # The sheet is sized to the MULTIBEAM survey (track + DEM, ~68 x 36 m): the area where
+    # all four sensors have data. The sidescan swath is ~100 m across-track (+-50 m range),
+    # so sizing the sheet to its full extent would shrink every other layer to a third of
+    # the sheet to make room for its far-range wings. Instead the wings are clipped to the
+    # sheet, which is also what the figure is claiming: one common area, four sensors.
+    mb_xy = np.column_stack([nav["xm"], nav["ym"]])
+    _, ev = np.linalg.eigh(np.cov(mb_xy.T))
+    theta = -np.arctan2(ev[1, -1], ev[0, -1])
+    c0 = mb_xy.mean(axis=0)
+
+    foot = np.vstack([mb_xy, _raster_data_xy(dem, dem_ext)])
+    foot = (foot - c0) @ _rot2(theta).T
+    (fx0, fy0), (fx1, fy1) = foot.min(axis=0) - 2.0, foot.max(axis=0) + 2.0
+
+    # Oblique projection geometry. SX: shear; SY: foreshortening (higher = more upright).
     SX, SY, THK = 0.48, 0.34, 0.05
-    PW, MX, MY = 1.0, 0.045, 0.05
-    LEVELS = 5                                    # 0 fondo .. 4 trayectoria (cima)
+    PW, MX, MY = 1.0, 0.03, 0.035
+    LEVELS = 5                                    # 0 seafloor .. 4 track (top)
 
-    # Los datos RELLENAN EL ANCHO de la lámina (lo pedido). La profundidad de la lámina
-    # se fija con el dato más 'alto' (menor w/h) para que quepa a ancho completo sin
-    # salirse; los demás llenan el ancho y quedan centrados en profundidad.
-    min_aspect = min((b[1] - b[0]) / (b[3] - b[2]) for b in (dem_ext, sss_ext, mb_bb))
-    PH = (PW * (1 - 2 * MX) / min_aspect) / (1 - 2 * MY)
-    GAP = SY * PH + 0.09                          # separación > alto de lámina en pantalla
+    # The sheet IS the survey footprint: its aspect comes from the rotated bbox, so the data
+    # fills it edge to edge instead of floating in the middle of an arbitrary rectangle.
+    SC = PW * (1 - 2 * MX) / (fx1 - fx0)          # metres -> sheet units
+    PH = (fy1 - fy0) * SC / (1 - 2 * MY)
+    GAP = SY * PH + 0.09                          # spacing > on-screen sheet height
 
     def iso(level):
         return Affine2D().from_values(1, 0, SX, SY, 0, level * GAP)
@@ -556,18 +607,20 @@ def fig_layer_stack(res, out, nav):
     def proj(u, v, level):
         return (u + SX * v, SY * v + level * GAP)
 
-    def fit_ext(bx):                              # raster -> extent que llena el ancho
-        s = min(PW * (1 - 2 * MX) / (bx[1] - bx[0]), PH * (1 - 2 * MY) / (bx[3] - bx[2]))
-        w, hh = (bx[1] - bx[0]) * s, (bx[3] - bx[2]) * s
-        ox, oy = (PW - w) / 2, (PH - hh) / 2
-        return [ox, ox + w, oy, oy + hh]
+    # UTM -> sheet: recentre, rotate into the survey frame, scale, inset by the margins.
+    W2S = (Affine2D().translate(-c0[0], -c0[1]).rotate(theta)
+           .translate(-fx0, -fy0).scale(SC).translate(PW * MX, PH * MY))
 
-    def fit_xy(x, y, bx):
-        s = min(PW * (1 - 2 * MX) / (bx[1] - bx[0]), PH * (1 - 2 * MY) / (bx[3] - bx[2]))
-        ox, oy = (PW - (bx[1] - bx[0]) * s) / 2, (PH - (bx[3] - bx[2]) * s) / 2
-        return ox + (x - bx[0]) * s, oy + (y - bx[2]) * s
+    # Where the footprint lands on every sheet (used to place the non-georeferenced mosaic).
+    RECT = (PW * MX, PW * (1 - MX), PH * MY, PH * (1 - MY))
 
-    # Límites del lienzo + tamaño de figura (sin franja muerta: alto = aspecto real).
+    def fit_rect(w, h):                           # pixel box -> RECT, aspect preserved
+        s = min((RECT[1] - RECT[0]) / w, (RECT[3] - RECT[2]) / h)
+        ox = 0.5 * (RECT[0] + RECT[1] - w * s)
+        oy = 0.5 * (RECT[2] + RECT[3] - h * s)
+        return [ox, ox + w * s, oy, oy + h * s]
+
+    # Canvas limits + figure size (no dead band: height = real aspect).
     top = LEVELS - 1
     content_r = PW + SX * PH
     xL, xR = -0.06, content_r + max(0.98, content_r * 0.72)
@@ -582,23 +635,30 @@ def fig_layer_stack(res, out, nav):
         s.set_visible(False)
     ax.set_aspect("equal")
 
-    # Postes de ensamblaje: unen las 4 esquinas de la lámina entre la base y la cima.
+    # Assembly posts: join the sheet's 4 corners between base and top.
     for (u, v) in [(0, 0), (PW, 0), (PW, PH), (0, PH)]:
         p0, p1 = proj(u, v, 0), proj(u, v, top)
         ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color="#38382f", lw=0.8,
                 ls=(0, (4, 3)), zorder=1)
 
     def walls(level, edge, edge_dark, z):
-        """Muro frontal y lateral -> dan grosor de lámina a la capa."""
+        """Front and side walls -> give the layer its sheet thickness."""
         BL, BR, TR = proj(0, 0, level), proj(PW, 0, level), proj(PW, PH, level)
         front = [BL, BR, (BR[0], BR[1] - THK), (BL[0], BL[1] - THK)]
         right = [BR, TR, (TR[0], TR[1] - THK), (BR[0], BR[1] - THK)]
         ax.add_patch(Polygon(front, closed=True, fc=edge, ec="none", zorder=z))
         ax.add_patch(Polygon(right, closed=True, fc=edge_dark, ec="none", zorder=z))
 
+    def corners(level):
+        return [proj(0, 0, level), proj(PW, 0, level), proj(PW, PH, level), proj(0, PH, level)]
+
     def outline(level, edge, z, **kw):
-        c = [proj(0, 0, level), proj(PW, 0, level), proj(PW, PH, level), proj(0, PH, level)]
-        ax.add_patch(Polygon(c, closed=True, fill=False, ec=edge, zorder=z, **kw))
+        ax.add_patch(Polygon(corners(level), closed=True, fill=False, ec=edge, zorder=z, **kw))
+
+    def clip(im, level):
+        """Trim a layer to its sheet. The sidescan overflows it by design (see above)."""
+        im.set_clip_path(Polygon(corners(level), transform=ax.transData))
+        return im
 
     def side_label(level, text, color, sub=None):
         px, py = proj(PW, PH * 0.5, level)
@@ -611,71 +671,81 @@ def fig_layer_stack(res, out, nav):
 
     tr = ax.transData
 
-    # ── nivel 0: fondo marino real (roca · arena · posidonia) ───────────────────
+    # ── level 0: real seafloor (rock · sand · posidonia) ────────────────────────
     z = 0
     walls(0, "#241d12", "#150f07", z)
     sea = _procedural_seafloor(680, int(680 * PH / PW))
-    ax.imshow(sea, extent=[0, PW, 0, PH], origin="upper",
-              transform=iso(0) + tr, interpolation="bilinear", zorder=z + 2)
+    clip(ax.imshow(sea, extent=[0, PW, 0, PH], origin="upper",
+                   transform=iso(0) + tr, interpolation="bilinear", zorder=z + 2), 0)
     outline(0, "#6b5a3a", z + 4, lw=1.1)
-    side_label(0, "Seafloor", "#d8c48f", sub="rock · sand · posidonia")
+    side_label(0, "Seafloor", "#d8c48f")
 
-    # ── nivel 1: cámaras estéreo — marco VACÍO = el siguiente paso ───────────────
+    # ── level 1: stereo cameras — optical photomosaic ───────────────────────────
     z = 10
     walls(1, "#141414", "#0c0c0c", z)
-    outline(1, STEREO_COL, z + 3, lw=1.4, ls="--", alpha=0.85)
-    for t in np.linspace(0.14, 0.86, 6):                 # rejilla tenue "por hacer"
-        a0, a1 = proj(t * PW, 0.08 * PH, 1), proj(t * PW, 0.92 * PH, 1)
-        b0, b1 = proj(0.08 * PW, t * PH, 1), proj(0.92 * PW, t * PH, 1)
-        ax.plot([a0[0], a1[0]], [a0[1], a1[1]], color=STEREO_COL, lw=0.5, alpha=0.16, zorder=z + 2)
-        ax.plot([b0[0], b1[0]], [b0[1], b1[1]], color=STEREO_COL, lw=0.5, alpha=0.16, zorder=z + 2)
-    cx, cy = proj(PW * 0.5, PH * 0.5, 1)                 # icono de cámara estéreo
-    ax.add_patch(Rectangle((cx - 0.085, cy - 0.042), 0.17, 0.084, fc="#101816",
-                           ec=STEREO_COL, lw=1.5, alpha=0.95, zorder=z + 3))
-    for dx in (-0.042, 0.042):
-        ax.add_patch(Circle((cx + dx, cy), 0.026, fc="none", ec=STEREO_COL, lw=1.6, zorder=z + 4))
-        ax.add_patch(Circle((cx + dx, cy), 0.011, fc=STEREO_COL, ec="none", alpha=0.55, zorder=z + 4))
-    ax.text(cx, cy - 0.085, "?", color=STEREO_COL, fontsize=18, fontweight="bold",
-            ha="center", va="center", alpha=0.8, zorder=z + 4)
-    side_label(1, "Stereo cameras", STEREO_COL, sub="— next step —")
+    if mos is not None:
+        # No georeferencing on the PNG: it is fitted to the footprint rectangle. Its major
+        # axis is already horizontal (_load_mosaic de-rotates it), which is the survey frame
+        # the other layers land in, so it lines up with them.
+        clip(ax.imshow(mos, extent=fit_rect(mos.shape[1], mos.shape[0]), origin="upper",
+                       transform=iso(1) + tr, interpolation="bilinear", zorder=z + 2), 1)
+        outline(1, STEREO_COL, z + 4, lw=1.4, alpha=0.9)
+        side_label(1, "Stereo cameras", STEREO_COL)
+    else:
+        outline(1, STEREO_COL, z + 3, lw=1.4, ls="--", alpha=0.85)
+        for t in np.linspace(0.14, 0.86, 6):             # faint "to do" grid
+            a0, a1 = proj(t * PW, 0.08 * PH, 1), proj(t * PW, 0.92 * PH, 1)
+            b0, b1 = proj(0.08 * PW, t * PH, 1), proj(0.92 * PW, t * PH, 1)
+            ax.plot([a0[0], a1[0]], [a0[1], a1[1]], color=STEREO_COL, lw=0.5, alpha=0.16, zorder=z + 2)
+            ax.plot([b0[0], b1[0]], [b0[1], b1[1]], color=STEREO_COL, lw=0.5, alpha=0.16, zorder=z + 2)
+        cx, cy = proj(PW * 0.5, PH * 0.5, 1)             # stereo camera icon
+        ax.add_patch(Rectangle((cx - 0.085, cy - 0.042), 0.17, 0.084, fc="#101816",
+                               ec=STEREO_COL, lw=1.5, alpha=0.95, zorder=z + 3))
+        for dx in (-0.042, 0.042):
+            ax.add_patch(Circle((cx + dx, cy), 0.026, fc="none", ec=STEREO_COL, lw=1.6, zorder=z + 4))
+            ax.add_patch(Circle((cx + dx, cy), 0.011, fc=STEREO_COL, ec="none", alpha=0.55, zorder=z + 4))
+        ax.text(cx, cy - 0.085, "?", color=STEREO_COL, fontsize=18, fontweight="bold",
+                ha="center", va="center", alpha=0.8, zorder=z + 4)
+        side_label(1, "Stereo cameras", STEREO_COL, sub="— next step —")
 
-    # ── nivel 2: batimetría multihaz (relieve sombreado) ────────────────────────
+    # ── level 2: multibeam bathymetry (shaded relief) ───────────────────────────
     z = 20
     walls(2, "#10233f", "#091729", z)
     rgba_dem, _ = shade(dem, CMAP_DEPTH)
-    ax.imshow(rgba_dem, extent=fit_ext(dem_ext), origin="upper",
-              transform=iso(2) + tr, interpolation="bilinear", zorder=z + 2)
+    clip(ax.imshow(rgba_dem, extent=dem_ext, origin="upper",
+                   transform=W2S + iso(2) + tr, interpolation="bilinear", zorder=z + 2), 2)
     outline(2, "#2c5488", z + 4, lw=1.0)
     side_label(2, "Multibeam bathymetry", "#7db3ef")
 
-    # ── nivel 3: mosaico sidescan ───────────────────────────────────────────────
+    # ── level 3: sidescan mosaic ───────────────────────────────────────────────
     z = 30
     walls(3, "#26261f", "#161610", z)
-    ax.imshow(_raster_rgba(sss, CMAP_BS), extent=fit_ext(sss_ext), origin="upper",
-              transform=iso(3) + tr, interpolation="bilinear", zorder=z + 2)
+    clip(ax.imshow(_raster_rgba(sss, CMAP_BS), extent=sss_ext, origin="upper",
+                   transform=W2S + iso(3) + tr, interpolation="bilinear", zorder=z + 2), 3)
     outline(3, "#4a4a44", z + 4, lw=1.0)
     side_label(3, "Side-scan sonar", INK2)
 
-    # ── nivel 4: trayectoria del AUV (panel de vidrio) ──────────────────────────
+    # ── level 4: AUV track (glass panel) ───────────────────────────────────────
     z = 40
     walls(4, "#161d2e", "#0b1120", z)
     panel = [proj(0, 0, 4), proj(PW, 0, 4), proj(PW, PH, 4), proj(0, PH, 4)]
     ax.add_patch(Polygon(panel, closed=True, fc="#0f1626", ec="none", alpha=0.55, zorder=z + 1))
     outline(4, "#3a4a6b", z + 6, lw=1.0)
 
-    # Una sola traza limpia: las dos misiones se solapan casi del todo y juntas eran
-    # una maraña ilegible. Naranja = "AUV track", como en 01/02 de este mismo set.
+    # A single clean track: the two missions overlap almost entirely and together were an
+    # illegible tangle. Orange = "AUV track", as in 01/02 of this same set.
     tr4 = iso(4) + tr
-    um, vm = fit_xy(nav["xm"], nav["ym"], mb_bb)
+    uv = W2S.transform(mb_xy)                             # same frame as the sensor layers
+    um, vm = uv[:, 0], uv[:, 1]
     ax.plot(um, vm, color="#0d0d0d", lw=3.4, transform=tr4, solid_capstyle="round", zorder=z + 2)
     ax.plot(um, vm, color=MB_COL, lw=1.9, transform=tr4, solid_capstyle="round", zorder=z + 3)
 
-    try:                                                  # sprite del Sparus al final de la traza
+    try:                                                  # Sparus sprite at the end of the track
         sprite = load_auv_sprite(os.path.join(out, AUV_PNG))
         win = min(40, len(um) - 1)
         cxe, cye = proj(um[-1], vm[-1], 4)
-        c0 = proj(um[-1 - win], vm[-1 - win], 4)
-        heading = np.degrees(np.arctan2(cye - c0[1], cxe - c0[0]))
+        p0 = proj(um[-1 - win], vm[-1 - win], 4)
+        heading = np.degrees(np.arctan2(cye - p0[1], cxe - p0[0]))
         imbox = OffsetImage(auv_rotated(sprite, heading), zoom=AUV_ZOOM * 0.9,
                             interpolation="bilinear")
         ax.add_artist(AnnotationBbox(imbox, (cxe, cye), frameon=False, pad=0.0,
@@ -684,20 +754,30 @@ def fig_layer_stack(res, out, nav):
         pass
     side_label(4, "AUV trajectory", INK)
 
+    # North arrow: the survey frame is rotated, so north is not up any more. Its direction
+    # goes through the same shear as the sheets, or it would point somewhere the data does not.
+    nu, nv = _rot2(theta) @ np.array([0.0, 1.0])
+    dx, dy = 0.16 * (nu + SX * nv), 0.16 * SY * nv
+    bx, by = content_r + 0.50, yT - 0.13
+    ax.annotate("", xy=(bx + dx, by + dy), xytext=(bx, by), zorder=90,
+                arrowprops=dict(arrowstyle="-|>", color=MUTED, lw=1.3, shrinkA=0, shrinkB=0))
+    ax.text(bx + dx * 1.34, by + dy * 1.34, "N", color=MUTED, fontsize=11,
+            fontweight="bold", ha="center", va="center", zorder=90)
+
     ax.set_xlim(xL, xR); ax.set_ylim(yB, yT)
     titles(fig, "Sensing the seabed")
     fig.savefig(os.path.join(out, "08_layer_stack.png"), dpi=130, facecolor=PAGE)
     plt.close(fig)
 
 
-# ── figura: octágonos frente al lawnmower clásico ───────────────────────────────
+# ── figure: octagons versus the classic lawnmower ───────────────────────────────
 def _self_crossings(xy, gap=6, grid=1.0):
-    """Puntos donde la polilínea se cruza consigo misma (revisitas reales).
+    """Points where the polyline crosses itself (real revisits).
 
-    Cada auto-cruce es un sitio que el AUV vuelve a visitar: material para un cierre
-    de bucle que corrige la deriva del INS. En un lawnmower de una pasada no los hay.
-    Prueba de intersección por orientación (ccw) vectorizada sobre todos los pares de
-    segmentos no consecutivos; los cruces se agrupan a una rejilla de `grid` m.
+    Each self-crossing is a place the AUV comes back to: material for a loop closure that
+    corrects INS drift. A single-pass lawnmower has none. Orientation (ccw) intersection
+    test, vectorized over every pair of non-consecutive segments; crossings are clustered
+    onto a `grid` m grid.
     """
     p, q = xy[:-1], xy[1:]
     i, j = np.triu_indices(len(p), k=gap)
@@ -720,13 +800,13 @@ def _self_crossings(xy, gap=6, grid=1.0):
 
 
 def _lawnmower_crosstrack(x_half, y_half, n_strips=11, n_cross=4, inset=0.92):
-    """Bustrofedón clásico MÁS líneas de amarre perpendiculares (cross-tracks).
+    """Classic boustrophedon PLUS perpendicular tie-lines (cross-tracks).
 
-    Sin cross-tracks el lawnmower de una pasada no se cruza jamás y no hay nada que
-    cerrar. Con ellos, cada tie-line atraviesa las `n_strips` franjas: n_strips*n_cross
-    revisitas. Las franjas van metidas hacia dentro (`inset`) para que los tramos de
-    enlace de los cross-tracks corran por fuera y no se apoyen en sus extremos (si no,
-    el detector de auto-cruces cuenta los vértices compartidos como cruces).
+    Without cross-tracks a single-pass lawnmower never crosses itself and there is nothing
+    to close. With them, each tie-line traverses the `n_strips` strips: n_strips*n_cross
+    revisits. The strips are pulled inwards (`inset`) so the cross-tracks' link segments run
+    outside them rather than resting on their ends (otherwise the self-crossing detector
+    counts the shared vertices as crossings).
     """
     ys = np.linspace(-y_half * inset, y_half * inset, n_strips)
     pts = []
@@ -739,7 +819,7 @@ def _lawnmower_crosstrack(x_half, y_half, n_strips=11, n_cross=4, inset=0.92):
     xs = np.linspace(-x_half * 0.72, x_half * 0.72, n_cross)
     if bx < 0:
         xs = xs[::-1]
-    pts += [(bx, sy * y_half)]                            # sale del área por el lateral
+    pts += [(bx, sy * y_half)]                            # leaves the area sideways
     for xx in xs:
         pts += [(xx, sy * y_half), (xx, -sy * y_half)]
         sy = -sy
@@ -747,11 +827,11 @@ def _lawnmower_crosstrack(x_half, y_half, n_strips=11, n_cross=4, inset=0.92):
 
 
 def _corners(xy, thresh=85.0, step=None):
-    """Vértices donde el rumbo cambia >= `thresh` grados.
+    """Vertices where the heading changes by >= `thresh` degrees.
 
-    Cada uno es una maniobra: el AUV sale de ella con un error de rumbo nuevo. En la
-    trayectoria REAL hay que remuestrear por arco (`step` metros) antes de derivar el
-    rumbo, o el ruido del INS reparte el giro entre decenas de muestras y no se ve.
+    Each one is a manoeuvre the AUV comes out of with a fresh heading error. On the REAL
+    track, resample by arc length (`step` metres) before differentiating the heading, or the
+    INS noise spreads the turn over dozens of samples and it goes unseen.
     """
     if step:
         s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
@@ -764,22 +844,28 @@ def _corners(xy, thresh=85.0, step=None):
 
 
 def _principal_rotation(xy):
-    """Rotación que lleva el eje mayor de la nube a la horizontal."""
+    """Rotation that brings the cloud's major axis to the horizontal."""
     _, v = np.linalg.eigh(np.cov(xy.T))
     t = -np.arctan2(v[1, -1], v[0, -1])
     return np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
 
 
-def _load_mosaic(path, long_side=1150, pct=0.3):
-    """Fotomosaico RGBA -> array float, eje mayor horizontal y recortado al dato.
+def _load_mosaic(path, long_side=1150, pct=0.3, rot180=False):
+    """RGBA photomosaic -> float array, major axis horizontal, cropped to the data.
 
-    Los mosaicos vienen en marco UTM (la huella cae en diagonal) y pesan ~90 MB. Se
-    submuestrea primero y se desgira después: rotar 66 Mpx es minutos, rotar 1 Mpx es
-    instantáneo. PIL.rotate(+ang) con `ang` = ángulo del eje mayor en coordenadas de
-    imagen (y hacia abajo) deja ese eje horizontal.
+    The mosaics come in a UTM frame (the footprint lies diagonally) and weigh ~90 MB.
+    Subsample first, de-rotate after: rotating 66 Mpx takes minutes, rotating 1 Mpx is
+    instant. PIL.rotate(+ang), with `ang` the major-axis angle in image coordinates (y
+    downwards), leaves that axis horizontal.
 
-    El recorte va por percentil y no por caja mínima: cuatro parches sueltos en las
-    puntas del mosaico inflaban la caja y dejaban la lámina medio vacía.
+    `rot180` resolves the direction by hand. PCA yields the AXIS, not the direction: the
+    sign of an eigenvector is arbitrary, so which end of the survey ends up on the left is
+    a coin toss, and the PNG carries no georeferencing to settle it. The footprint is too
+    symmetric to decide it automatically either (matching it against the multibeam coverage
+    scores 0.536 vs 0.541 IoU for the two options).
+
+    The crop is by percentile rather than minimum box: four stray patches at the mosaic's
+    tips inflated the box and left the sheet half empty.
     """
     im = Image.open(path).convert("RGBA")
     f = max(1, int(round(max(im.size) / float(long_side))))
@@ -788,30 +874,30 @@ def _load_mosaic(path, long_side=1150, pct=0.3):
 
     ys, xs = np.nonzero(np.array(im)[..., 3] > 8)
     _, v = np.linalg.eigh(np.cov(np.c_[xs - xs.mean(), ys - ys.mean()].T))
-    im = im.rotate(np.degrees(np.arctan2(v[1, -1], v[0, -1])),
-                   resample=Image.BICUBIC, expand=True)
+    ang = np.degrees(np.arctan2(v[1, -1], v[0, -1])) + (180.0 if rot180 else 0.0)
+    im = im.rotate(ang, resample=Image.BICUBIC, expand=True)
 
     a = np.array(im).astype(np.float32) / 255.0
     ys, xs = np.nonzero(a[..., 3] > 0.03)
     x0, x1 = np.percentile(xs, [pct, 100 - pct]).astype(int)
     y0, y1 = np.percentile(ys, [pct, 100 - pct]).astype(int)
     a = a[y0:y1 + 1, x0:x1 + 1]
-    a[..., :3] = np.clip(a[..., :3] * 1.14, 0, 1)         # el mosaico va sobre página negra
+    a[..., :3] = np.clip(a[..., :3] * 1.14, 0, 1)         # the mosaic sits on a black page
     return a
 
 
 def _chip(ax, x, y, text, color, z=60):
-    """Píldora de dato bajo el rótulo de columna. El bbox se ajusta solo al texto."""
+    """Data pill under the column label. The bbox hugs the text."""
     ax.text(x, y, text, color=color, fontsize=10.6, fontweight="bold", ha="center",
             va="center", zorder=z,
             bbox=dict(boxstyle="round,pad=0.44", fc="#17171a", ec=color, lw=1.0))
 
 
 def _adv_card(fig, rect, accent, glyph, head, body, ar=1.5):
-    """Tarjeta de ventaja: barra de acento, icono dibujado, título y cuerpo.
+    """Advantage card: accent bar, drawn icon, title and body.
 
-    `ar` = unidades-x por unidad-y del axes (no es equal aspect): sin él los iconos
-    salen aplastados en vertical.
+    `ar` = x-units per y-unit of the axes (this is not equal aspect): without it the icons
+    come out vertically squashed.
     """
     ca = fig.add_axes(rect)
     ca.set_xlim(0, 1); ca.set_ylim(0, 1); ca.axis("off")
@@ -819,8 +905,8 @@ def _adv_card(fig, rect, accent, glyph, head, body, ar=1.5):
                                 fc="#151513", ec="#2c2c2a", lw=1.0,
                                 transform=ca.transAxes, clip_on=False))
     ca.add_patch(Rectangle((0.015, 0.04), 0.022, 0.92, fc=accent, ec="none", clip_on=False))
-    gx, gy = 0.135, 0.73                                  # centro del icono
-    if glyph == "turn90":                                 # esquina de 90° = giro que sangra
+    gx, gy = 0.135, 0.73                                  # icon centre
+    if glyph == "turn90":                                 # 90° corner = the turn that bleeds
         x0, y0 = gx - 0.075, gy - 0.055 * ar
         ca.plot([x0, x0], [y0, y0 + 0.10 * ar], color=accent, lw=2.6, solid_capstyle="round")
         ca.plot([x0, x0 + 0.145], [y0 + 0.10 * ar, y0 + 0.10 * ar], color=accent, lw=2.6,
@@ -829,70 +915,69 @@ def _adv_card(fig, rect, accent, glyph, head, body, ar=1.5):
                          color=accent, lw=1.2, alpha=0.8))
         ca.annotate("", xy=(x0 + 0.17, y0 + 0.10 * ar), xytext=(x0 + 0.145, y0 + 0.10 * ar),
                     arrowprops=dict(arrowstyle="-|>", color=accent, lw=2.6))
-    elif glyph == "loop":                                 # flecha circular = cierre de bucle
+    elif glyph == "loop":                                 # circular arrow = loop closure
         ca.add_patch(Arc((gx, gy), 0.14, 0.14 * ar, angle=0, theta1=300, theta2=210,
                          color=accent, lw=2.4))
         aa = np.radians(300)
         ca.annotate("", xy=(gx + 0.075 * np.cos(aa) + 0.03, gy + 0.075 * ar * np.sin(aa) + 0.03),
                     xytext=(gx + 0.075 * np.cos(aa), gy + 0.075 * ar * np.sin(aa)),
                     arrowprops=dict(arrowstyle="-|>", color=accent, lw=2.4))
-    elif glyph == "rose":                                 # 8 rumbos
+    elif glyph == "rose":                                 # 8 headings
         for k in range(8):
             a = np.radians(360 * k / 8)
             ca.annotate("", xy=(gx + 0.085 * np.cos(a), gy + 0.085 * ar * np.sin(a)),
                         xytext=(gx, gy), arrowprops=dict(arrowstyle="-|>", color=accent, lw=1.5))
     ca.text(0.29, 0.80, head, color=INK, fontsize=14.5, fontweight="bold", va="center")
-    # matplotlib `wrap=True` envuelve al ancho de la FIGURA, no del axes -> el texto se
-    # desbordaba a la tarjeta vecina. Se envuelve a mano a un nº de caracteres seguro.
+    # matplotlib's `wrap=True` wraps to the FIGURE width, not the axes' -> the text spilled
+    # into the neighbouring card. Wrapped by hand to a safe character count.
     ca.text(0.065, 0.58, textwrap.fill(body, 46), color=INK2, fontsize=10.4, va="top",
             ha="left", linespacing=1.34)
 
 
 def fig_octagon_vs_lawnmower(res, out):
-    """Dos estrategias en 3D (patrón arriba, fotomosaico debajo) sobre la misma área.
+    """Two strategies in 3D (pattern on top, photomosaic below) over the same area.
 
-    Cada columna es una pila oblicua de dos láminas, con la misma cizalla que la
-    figura 08: arriba lo que vuela el AUV, abajo lo que devuelven las cámaras. La
-    trayectoria de octágonos es REAL (Andratx); el lawnmower es sintético sobre la
-    misma huella, con cross-tracks para que también tenga cierres de bucle — así la
-    comparación no se gana por el lado fácil y queda el argumento de verdad: los
-    giros de 90° del bustrofedón acumulan deriva, los de 45° del octágono no.
+    Each column is an oblique stack of two sheets, with the same shear as figure 08: on top
+    what the AUV flies, below what the cameras return. The octagon track is REAL (Andratx);
+    the lawnmower is synthetic over the same footprint, with cross-tracks so that it gets
+    loop closures too — that way the comparison is not won cheaply and the real argument
+    stands: the boustrophedon's 90° turns accumulate drift, the octagon's 45° ones do not.
     """
     mos_dir = os.path.join(out, "mosaics")
     need = [SLAM_TRAJ] + [os.path.join(mos_dir, f) for f in ("lawnmower.png", "octogon.png")]
     missing = [p for p in need if not os.path.isfile(p)]
     if missing:
-        print(f"[media] 09 octágonos: faltan {missing}, se omite.")
+        print(f"[media] 09 octagons: {missing} missing, skipping.")
         return
 
-    # ── datos ───────────────────────────────────────────────────────────────────
+    # ── data ────────────────────────────────────────────────────────────────────
     xy = np.load(SLAM_TRAJ)[:, :2].astype(float)
     xy -= xy.mean(0)
-    cross_o = _self_crossings(xy[::3])                    # revisitas reales del octágono
-    R = _principal_rotation(xy)                           # eje mayor -> horizontal (llena la lámina)
+    cross_o = _self_crossings(xy[::3])                    # real octagon revisits
+    R = _principal_rotation(xy)                           # major axis -> horizontal (fills the sheet)
     oct_xy, cross_o = xy @ R.T, cross_o @ R.T
 
     xr, yr = np.abs(oct_xy[:, 0]).max(), np.abs(oct_xy[:, 1]).max()
-    corners_o = _corners(oct_xy, thresh=25.0, step=3.0)   # ~86 vértices, ninguno pasa de 45°
+    corners_o = _corners(oct_xy, thresh=25.0, step=3.0)   # ~86 vertices, none beyond 45°
     N_STRIP, N_CROSS = 9, 4
     lawn = _lawnmower_crosstrack(xr, yr, N_STRIP, N_CROSS)
-    turns_l = _corners(lawn)                              # esquinas, todas de 90° exactos
+    turns_l = _corners(lawn)                              # corners, all exactly 90°
     cross_l = _self_crossings(lawn, gap=2, grid=0.5)
-    cross_l = cross_l[np.abs(cross_l[:, 1]) < yr * 0.99]  # sólo las de dentro del área
+    cross_l = cross_l[np.abs(cross_l[:, 1]) < yr * 0.99]  # only those inside the area
 
     mos = {"lawn": _load_mosaic(os.path.join(mos_dir, "lawnmower.png")),
            "oct": _load_mosaic(os.path.join(mos_dir, "octogon.png"))}
 
-    # ── geometría de la proyección oblicua (misma familia que la figura 08) ─────
+    # ── oblique projection geometry (same family as figure 08) ─────────────────
     SX, SY, THK = 0.38, 0.60, 0.045
     PW, MX, MY = 1.0, 0.035, 0.045
     foot = (-xr, xr, -yr, yr)
     boxes = [foot] + [(0, m.shape[1], 0, m.shape[0]) for m in mos.values()]
     min_aspect = min((b[1] - b[0]) / (b[3] - b[2]) for b in boxes)
     PH = (PW * (1 - 2 * MX) / min_aspect) / (1 - 2 * MY)
-    GAP = SY * PH + 0.165                                 # separación entre láminas
-    COLW = PW + SX * PH                                   # ancho proyectado de una lámina
-    OX = (0.0, COLW + 0.30)                               # origen u de cada columna
+    GAP = SY * PH + 0.165                                 # spacing between sheets
+    COLW = PW + SX * PH                                   # projected width of a sheet
+    OX = (0.0, COLW + 0.30)                               # u origin of each column
 
     def iso(level, ox):
         return Affine2D().from_values(1, 0, SX, SY, ox, level * GAP)
@@ -900,7 +985,7 @@ def fig_octagon_vs_lawnmower(res, out):
     def proj(u, v, level, ox):
         return (ox + u + SX * v, SY * v + level * GAP)
 
-    def fit_ext(bx):                                      # dato -> extent que llena la lámina
+    def fit_ext(bx):                                      # data -> extent that fills the sheet
         s = min(PW * (1 - 2 * MX) / (bx[1] - bx[0]), PH * (1 - 2 * MY) / (bx[3] - bx[2]))
         w, hh = (bx[1] - bx[0]) * s, (bx[3] - bx[2]) * s
         ox, oy = (PW - w) / 2, (PH - hh) / 2
@@ -915,7 +1000,7 @@ def fig_octagon_vs_lawnmower(res, out):
     xL, xR_ = -0.56, OX[1] + COLW + 0.04
     yB, yT = -THK - 0.05, y_top + 0.195
 
-    # ── lienzo: escena isométrica arriba, tarjetas abajo ────────────────────────
+    # ── canvas: isometric scene on top, cards below ─────────────────────────────
     figW = 14.2
     scene_x, scene_w = 0.026, 0.955
     scene_h_in = (scene_w * figW) * (yT - yB) / (xR_ - xL)
@@ -950,14 +1035,14 @@ def fig_octagon_vs_lawnmower(res, out):
              proj(PW, PH, level, ox), proj(0, PH, level, ox)]
         ax.add_patch(Polygon(c, closed=True, fill=False, ec=edge, zorder=z, **kw))
 
-    # postes de ensamblaje: atan el fotomosaico a la trayectoria que lo generó
+    # assembly posts: tie the photomosaic to the track that produced it
     for ox in OX:
         for (u, v) in [(0, 0), (PW, 0), (PW, PH), (0, PH)]:
             p0, p1 = proj(u, v, 0, ox), proj(u, v, 1, ox)
             ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color="#38382f", lw=0.8,
                     ls=(0, (4, 3)), zorder=1)
 
-    # ── nivel 0: los fotomosaicos (lo que devuelven las cámaras) ────────────────
+    # ── level 0: the photomosaics (what the cameras return) ─────────────────────
     for ox, key in zip(OX, ("lawn", "oct")):
         img = mos[key]
         walls(0, ox, "#1b2422", "#101715", 2)
@@ -965,7 +1050,7 @@ def fig_octagon_vs_lawnmower(res, out):
                   transform=iso(0, ox) + tr, interpolation="bilinear", zorder=4)
         outline(0, ox, "#3d4a47", 6, lw=1.0)
 
-    # ── nivel 1: las dos estrategias (lo que vuela el AUV) ──────────────────────
+    # ── level 1: the two strategies (what the AUV flies) ────────────────────────
     def pattern(ox, path, color, cross, turns, header, sub, chips, turn_label, turn_col):
         walls(1, ox, "#161d2e", "#0b1120", 20)
         glass = Polygon([proj(0, 0, 1, ox), proj(PW, 0, 1, ox),
@@ -979,17 +1064,17 @@ def fig_octagon_vs_lawnmower(res, out):
                  ax.plot(p[:, 0], p[:, 1], color=color, lw=1.6, transform=t1,
                          solid_capstyle="round", zorder=23)[0]]
 
-        # los giros: cuadrado rojo grande = 90° (inyecta deriva), punto pequeño = 45°
+        # the turns: large red square = 90° (injects drift), small dot = 45°
         hard = turn_label.startswith("90")
         q = fit_xy(turns, foot)
         drawn.append(ax.scatter(q[:, 0], q[:, 1], s=18 if hard else 10,
                                 marker="s" if hard else "o", facecolor=turn_col,
                                 edgecolor="#0d0d0d", linewidth=0.45 if hard else 0.3,
                                 transform=t1, zorder=24))
-        c = fit_xy(cross, foot)                           # auto-cruces = cierres de bucle
+        c = fit_xy(cross, foot)                           # self-crossings = loop closures
         drawn.append(ax.scatter(c[:, 0], c[:, 1], s=26, facecolor=CROSS_COL,
                                 edgecolor="#0d0d0d", linewidth=0.6, transform=t1, zorder=25))
-        for a in drawn:                                   # el tránsito final se salía de la lámina
+        for a in drawn:                                   # the final transit ran off the sheet
             a.set_clip_path(glass)
         outline(1, ox, "#3a4a6b", 26, lw=1.0)
 
@@ -1001,9 +1086,9 @@ def fig_octagon_vs_lawnmower(res, out):
         for dx, (txt, col) in zip((-0.395, 0.0, 0.375), chips):
             _chip(ax, cx + dx, y_top + 0.050, txt, col)
 
-        # Anota UN vértice real: el más frontal de los centrados. Centrado porque el
-        # puntero cae recto y corto; frontal porque ahí no hay racimo de cruces ámbar
-        # ni se solapa con el borde de la lámina.
+        # Annotate ONE real vertex: the frontmost of the centred ones. Centred so the
+        # pointer falls straight and short; frontal because there is no cluster of amber
+        # crossings there and it does not overlap the sheet's edge.
         mid = turns[np.abs(turns[:, 0]) <= 0.55 * xr]
         px, py = proj(*fit_xy(mid[np.argmin(mid[:, 1])][None, :], foot)[0], 1, ox)
         ax.annotate(turn_label, xy=(px, py), xytext=(px, GAP - THK - 0.062),
@@ -1012,7 +1097,7 @@ def fig_octagon_vs_lawnmower(res, out):
                     arrowprops=dict(arrowstyle="-", color=turn_col, lw=1.1,
                                     shrinkA=7, shrinkB=3, alpha=0.9))
 
-    OCT_TURN = "#5fbf8f"                                  # verde: el giro que NO sangra
+    OCT_TURN = "#5fbf8f"                                  # green: the turn that does NOT bleed
     pattern(OX[0], lawn, LAWN_COL, cross_l, turns_l, "CLASSICAL LAWNMOWER",
             f"parallel strips + {N_CROSS} cross-tracks",
             [(f"{len(cross_l)} self-crossings", CROSS_COL), ("90° turns", TURN_COL),
@@ -1022,7 +1107,7 @@ def fig_octagon_vs_lawnmower(res, out):
             [(f"{len(cross_o)} self-crossings", CROSS_COL), ("45° turns", OCT_TURN),
              ("8 headings", OCT_COL)], "45° turn", OCT_TURN)
 
-    # ── raíl de la izquierda: qué es cada lámina (una vez, no por columna) ──────
+    # ── left rail: what each sheet is (once, not per column) ────────────────────
     for lvl, (head, sub) in enumerate([("PHOTOMOSAIC", "what the cameras return"),
                                        ("SURVEY PATTERN", "what the vehicle flies")]):
         yy = lvl * GAP + SY * PH * 0.40
@@ -1031,7 +1116,7 @@ def fig_octagon_vs_lawnmower(res, out):
         ax.text(-0.09, yy - 0.014, sub, color=MUTED, fontsize=10.2, ha="right",
                 va="center", zorder=30)
 
-    # ── tarjetas ────────────────────────────────────────────────────────────────
+    # ── cards ───────────────────────────────────────────────────────────────────
     cy, ch, cw = 0.66 / figH, 2.02 / figH, 0.300
     ar = (cw * figW) / (ch * figH)
     _adv_card(fig, [0.030, cy, cw, ch], TURN_COL, "turn90", "90° turns leak heading",
@@ -1063,18 +1148,18 @@ def main():
 
     cache = os.path.join(out, ".nav_cache.npz")
     if not os.path.isfile(cache):
-        print(f"[media] falta {cache}: genéralo con las trayectorias de los bags.")
+        print(f"[media] {cache} missing: generate it from the bag trajectories.")
         return 1
 
     nav = dict(np.load(cache))
 
-    for name, fn in [("01 batimetría", fig_bathymetry), ("02 backscatter", fig_backscatter),
-                     ("03 sidescan", fig_sss), ("06 dos misiones", fig_two_surveys),
-                     ("08 pila de capas", fig_layer_stack)]:
+    for name, fn in [("01 bathymetry", fig_bathymetry), ("02 backscatter", fig_backscatter),
+                     ("03 sidescan", fig_sss), ("06 two surveys", fig_two_surveys),
+                     ("08 layer stack", fig_layer_stack)]:
         print(f"[media] {name} ...")
         fn(res, out, nav)
 
-    print("[media] 09 octágonos vs lawnmower ...")
+    print("[media] 09 octagons vs lawnmower ...")
     fig_octagon_vs_lawnmower(res, out)
 
     print("[media] 04 reveal.gif ...")

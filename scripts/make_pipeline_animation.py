@@ -33,13 +33,13 @@ OUT_DIR  = os.path.join(PKG_ROOT, "results", "presentation")
 FPS      = 20
 DPI      = 110
 
-# Frame budget per stage (title hold + body). Duración = TOTAL / FPS.
-# Para alargar el clip se AÑADEN fotogramas, no se bajan los fps: la órbita recorre los
-# mismos 120 grados de azimut en todo el clip, así que a 11-12 fps saldría a trompicones.
+# Frame budget per stage (title hold + body). Duration = TOTAL / FPS.
+# To lengthen the clip, ADD frames rather than lowering the fps: the orbit sweeps the same
+# 120° of azimuth over the whole clip, so at 11-12 fps it would judder.
 ST1 = 70    # area match
 ST2 = 80    # point cloud
 ST3 = 85    # mesh build
-ST4 = 125   # sss projection (es el desenlace: se le da el hold más largo)
+ST4 = 125   # sss projection (the payoff shot: longest hold)
 TOTAL = ST1 + ST2 + ST3 + ST4          # 360 frames / 20 fps = 18.0 s
 
 
@@ -57,7 +57,7 @@ def setup_axes(ax, V):
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_zlim(zmin, zmax)
-    # zoom: sin él el fondo marino ocupaba un quinto del lienzo.
+    # zoom: without it the seafloor filled only a fifth of the canvas.
     ax.set_box_aspect((xmax - xmin, ymax - ymin, max(zmax - zmin, 1) * 3), zoom=1.28)
     ax.set_xlabel("Easting (m from survey origin)")
     ax.set_ylabel("Northing (m from survey origin)")
@@ -71,8 +71,8 @@ def main():
     inten, cloud = s["inten"], s["cloud"].copy()
     mb_traj, sss_traj = f["mb_traj"].copy(), f["sss_traj"].copy()
 
-    # Todo a metros locales. En UTM (446525, 4377214) matplotlib saca un "+4.465e5"
-    # de offset en el eje que se recorta fuera del lienzo y no se lee.
+    # Everything in local metres. In UTM (446525, 4377214) matplotlib puts a "+4.465e5"
+    # offset on the axis that gets clipped off the canvas and is unreadable.
     org = np.array([V[:, 0].min(), V[:, 1].min()])
     V[:, :2] -= org
     cloud[:, :2] -= org
@@ -86,8 +86,8 @@ def main():
     face_z = tris[:, :, 2].mean(axis=1)
     # Stage-3 colormap: depth shading (terrain)
     zc = (face_z - face_z.min()) / (np.ptp(face_z) + 1e-9)
-    # Un solo tono (magnitud), no cm.terrain: un arcoíris inventa fronteras que el
-    # dato no tiene. Misma rampa azul que el resto de results/media.
+    # A single hue (magnitude), not cm.terrain: a rainbow invents boundaries the data
+    # does not have. Same blue ramp as the rest of results/media.
     depth_colors = CMAP_DEPTH(zc)
     # Stage-4 colormap: SSS intensity per face (gray backscatter)
     face_i = inten[T].mean(axis=1)
@@ -98,8 +98,8 @@ def main():
         # Stretch into a visible mid-bright range so backscatter texture pops
         vi = 0.2 + 0.8 * np.clip((face_i - lo) / (hi - lo + 1e-9), 0, 1)
     sss_colors = cm.gray(vi)
-    sss_colors[~valid] = (0.16, 0.16, 0.15, 1.0)  # sin cobertura SSS: gris neutro,
-                                                 # igual que en 07_mb_sss_fusion.gif
+    sss_colors[~valid] = (0.16, 0.16, 0.15, 1.0)  # no SSS coverage: neutral gray,
+                                                 # same as in 07_mb_sss_fusion.gif
 
     fig = plt.figure(figsize=(9, 6))
     ax = fig.add_subplot(111, projection="3d")

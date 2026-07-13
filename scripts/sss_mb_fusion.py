@@ -48,13 +48,13 @@ def main():
     output_mesh = os.path.join(mesh_dir, "mb_textured_sss.ply")
     COLORMAP = cm.gray
     NODATA_VALUE = 0
-    # Color de los vértices que caen FUERA de la franja del sidescan. Un rojo apagado
-    # y no un gris: con cm.gray un gris cualquiera se confundiría con backscatter real,
-    # y el negro se confunde con backscatter bajo.
+    # Color for vertices falling OUTSIDE the sidescan swath. A muted red rather than a
+    # gray, which under cm.gray would be mistaken for real backscatter (and black for
+    # low backscatter).
     NO_SSS_COLOR = (0.45, 0.12, 0.12)
 
     # Max seconds to wait for the upstream producers before falling back to
-    # whatever already exists on disk. <=0 salta la espera y lee de disco.
+    # whatever already exists on disk. <=0 skips the wait and reads from disk.
     wait_timeout = rospy.get_param('~wait_timeout', 600.0)
 
     # Wait for both producers (timeout -> fall back to files on disk).
@@ -62,10 +62,10 @@ def main():
     rospy.Subscriber('/pipeline/mb_done', Bool, mb_callback)
     rospy.Subscriber('/pipeline/sss_done', Bool, sss_callback)
 
-    # OJO: el `wait_timeout > 0` iba DENTRO de la condición de break, así que un
-    # wait_timeout=0 no desactivaba la espera: la hacía infinita. Se comprueba antes.
+    # Checked before the loop: `wait_timeout > 0` used to live inside the break
+    # condition, so wait_timeout=0 made the wait infinite instead of disabling it.
     if wait_timeout <= 0:
-        rospy.loginfo("wait_timeout<=0: no se esperan señales, se leen los ficheros de disco.")
+        rospy.loginfo("wait_timeout<=0: skipping signals, reading the files from disk.")
     else:
         rospy.loginfo("Waiting for BOTH processes to finish (timeout %.0fs)..." % wait_timeout)
 
@@ -108,9 +108,9 @@ def main():
             sss = src.read(1)
             nodata = src.nodata
 
-            # Muestreo VECTORIZADO de la intensidad SSS en cada vértice (x, y) UTM.
-            # src.index() acepta arrays; antes se llamaba una vez por vértice dentro
-            # de un bucle Python de 1.5 M iteraciones.
+            # VECTORIZED sampling of the SSS intensity at each vertex (x, y) in UTM.
+            # src.index() accepts arrays; it used to be called once per vertex inside a
+            # 1.5 M-iteration Python loop.
             rospy.loginfo("Projecting SSS intensity onto the mesh...")
             rows, cols = src.index(vertices[:, 0], vertices[:, 1])
 
@@ -134,16 +134,16 @@ def main():
     valid = intensity > NODATA_VALUE
     rospy.loginfo(
         f"Vertices with valid intensity: {np.sum(valid)} / {len(valid)} "
-        f"({valid.mean() * 100:.1f}% sobre la franja del SSS)"
+        f"({valid.mean() * 100:.1f}% over the SSS swath)"
     )
 
     if not np.any(valid):
         rospy.logerr("ERROR: No mesh vertices intersect with the SSS mosaic.")
         return
 
-    # Normalizar SOLO con los válidos. Si se normaliza el array entero, los vértices sin
-    # dato (intensity=0, por debajo de imin) dan un valor NEGATIVO que el colormap satura
-    # a negro y quedan indistinguibles de un backscatter bajo real. Se pintan aparte.
+    # Normalize using ONLY the valid vertices. Normalizing the whole array maps the
+    # no-data ones (intensity=0, below imin) to a NEGATIVE value that the colormap
+    # saturates to black, making them indistinguishable from real low backscatter.
     imin, imax = intensity[valid].min(), intensity[valid].max()
 
     colors = np.tile(np.array(NO_SSS_COLOR), (len(vertices), 1))

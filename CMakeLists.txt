@@ -1,4 +1,4 @@
-# Paquete de post-procesado acústico (Python)
+# Acoustic post-processing package (Python)
 
 cmake_minimum_required(VERSION 3.0.2)
 project(acoustic_postprocessing)
@@ -9,12 +9,12 @@ find_package(catkin REQUIRED COMPONENTS
   ros_numpy
 )
 
-# Metadatos del paquete Python (setup.py)
+# Python package metadata (setup.py)
 catkin_python_setup()
 
 catkin_package()
 
-# Instalar los scripts ejecutables en lib/${PROJECT_NAME}
+# Install executable scripts into lib/${PROJECT_NAME}
 catkin_install_python(PROGRAMS
   scripts/multibeam_processor.py
   scripts/multibeam_intensity.py
@@ -25,7 +25,7 @@ catkin_install_python(PROGRAMS
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-# Instalar los archivos launch
+# Install launch files
 install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
 )

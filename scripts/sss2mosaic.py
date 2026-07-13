@@ -20,12 +20,11 @@ import tf.transformations as tr
 from std_msgs.msg import Bool
 import time
 
-# Rango por canal (m). Es SOLO un fallback: el valor real viene en los mensajes
-# SSSConfig del bag (topic .../raw_data/<side>/sss_info, campo `range`) y se lee con
-# get_sonar_range(). El 30.0 hardcodeado que había aquí era FALSO para los bags de
-# Andratx (range real = 50.0 m): colocaba cada muestra al 60% de su rango verdadero,
-# comprimiendo el mosaico x0.6 across-track y arrastrando el error a mb_sss_mosaic.tif
-# y a la textura de mb_textured_sss.ply.
+# Per-channel range (m). ONLY a fallback: the real value comes from the bag's SSSConfig
+# messages (topic .../raw_data/<side>/sss_info, field `range`) and is read by
+# get_sonar_range(). The 30.0 that used to be hardcoded here was WRONG for the Andratx
+# bags (real range 50.0 m): it placed every sample at 60% of its true range, squeezing
+# the mosaic x0.6 across-track and propagating the error downstream.
 SONAR_RANGE_FALLBACK = 30.0
 MOSAIC_RES = 0.07    # m/pixel
 BLIND_ZONE = 0.2     # m, nadir gap to skip
@@ -140,7 +139,7 @@ def get_nav_data(bag, nav_topic):
 
 
 def get_sonar_range(bag, fallback=SONAR_RANGE_FALLBACK):
-    """Rango por canal (m) leído de los SSSConfig del bag; `fallback` si no hay."""
+    """Per-channel range (m) read from the bag's SSSConfig; `fallback` if absent."""
     cfg_topics = [
         t for t in bag.get_type_and_topic_info().topics
         if t.endswith('/sss_info')
@@ -150,7 +149,7 @@ def get_sonar_range(bag, fallback=SONAR_RANGE_FALLBACK):
         if getattr(msg, 'range', 0.0) > 0.0:
             return float(msg.range)
 
-    rospy.logwarn(f"Sin SSSConfig en el bag; uso SONAR_RANGE={fallback} m (puede ser falso).")
+    rospy.logwarn(f"No SSSConfig in the bag; using SONAR_RANGE={fallback} m (may be wrong).")
 
     return float(fallback)
 
@@ -158,31 +157,31 @@ def get_sonar_range(bag, fallback=SONAR_RANGE_FALLBACK):
 def angle_varying_gain(intensity, theta, is_port, bin_deg=2.0, min_samples=200,
                        max_boost=8.0):
     """
-    Corrección AVG (Angle Varying Gain) del backscatter del sidescan.
+    AVG (Angle Varying Gain) correction of the sidescan backscatter.
 
-    El eco del SSS está dominado por el ángulo de incidencia sobre el fondo: brillante
-    cerca del nadir, oscuro en rango lejano. Ese patrón es geometría del sonar, no tipo
-    de fondo, y domina el contraste del mosaico y de la malla texturizada.
+    The SSS echo is dominated by the incidence angle on the bottom: bright near nadir,
+    dark at far range. That pattern is sonar geometry rather than bottom type, and it
+    dominates the contrast of the mosaic and of the textured mesh.
 
-    Perfil = MEDIA de intensidad por bin angular. OJO: la versión del multihaz usa la
-    MEDIANA, y aquí NO sirve. El eco crudo del SSS está saturado de ceros (47.5% de las
-    muestras son 0 exacto; p75 = 2 sobre 255), así que la mediana por bin vale 0-1 y no
-    mide ganancia sino relleno: el "perfil" sale plano y la corrección es un no-op. La
-    media sí decae suavemente con el ángulo y es lo que hay que dividir.
+    Profile = MEAN intensity per angular bin. Note the multibeam version uses the MEDIAN,
+    which does NOT work here: the raw SSS echo is saturated with zeros (47.5% of samples
+    are exactly 0, p75 = 2 out of 255), so the per-bin median is 0-1 and measures fill
+    rather than gain — the profile comes out flat and the correction is a no-op. The mean
+    does decay smoothly with angle.
 
-    El perfil cae ~700x del nadir al rango lejano, donde la señal es casi todo ceros.
-    Dividir por él a pelo amplificaría el ruido de la cola x700, así que la ganancia se
-    acota por abajo a `gmax / max_boost`: más allá de ese punto no hay SNR que rescatar
-    y la cola conserva algo de oscurecimiento residual, a propósito.
+    The profile falls ~700x from nadir to far range, where the signal is almost all zeros.
+    Dividing by it directly would amplify the tail noise 700x, so the gain is floored at
+    `gmax / max_boost`: past that point there is no SNR to recover, and the tail keeps
+    some residual darkening on purpose.
 
-    DOS DIFERENCIAS con el multihaz, ambas deliberadas:
-      - Perfil SEPARADO por banda (port/stbd): transductores distintos con ganancias
-        distintas; un perfil único dejaría un escalón justo en el nadir.
-      - Escala COMÚN g0 para las dos bandas. Normalizar cada lado a su propia mediana
-        quitaría el patrón angular pero conservaría el desbalance port/stbd, que
-        también es ganancia y no fondo.
+    TWO deliberate differences from the multibeam version:
+      - SEPARATE profile per band (port/stbd): different transducers with different gains;
+        a single profile would leave a step right at nadir.
+      - COMMON scale g0 for both bands. Normalizing each side to its own median would
+        remove the angular pattern but keep the port/stbd imbalance, which is also gain
+        and not bottom.
 
-    Devuelve (intensidad_corregida, info) o (None, None) si no hay bins suficientes.
+    Returns (corrected_intensity, info), or (None, None) if there are too few bins.
     """
     bins = np.arange(0.0, 90.0 + bin_deg, bin_deg)
     centers = (bins[:-1] + bins[1:]) / 2.0
@@ -244,9 +243,9 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=
     width = int(np.ceil((x_max - x_min) / MOSAIC_RES))
     height = int(np.ceil((y_max - y_min) / MOSAIC_RES))
 
-    # Se bufferean las muestras (celda, intensidad, ángulo, banda) en vez de acumularlas
-    # al vuelo: el perfil AVG es una mediana GLOBAL por bin angular, así que hay que ver
-    # todos los pings antes de corregir. Son ~6 M muestras (~0.1 GB), una sola pasada.
+    # Samples (cell, intensity, angle, band) are buffered instead of accumulated on the
+    # fly: the AVG profile is GLOBAL per angular bin, so every ping must be seen before
+    # correcting. About 6 M samples (~0.1 GB) in a single pass.
     buf_idx = []
     buf_int = []
     buf_ang = []
@@ -303,10 +302,8 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=
         slant = np.arange(npx) * meters_px
         ground = np.sqrt(np.maximum(slant**2 - h**2, 0.0))
 
-        # Ángulo de incidencia sobre el fondo (desde la vertical): 0° en el nadir,
-        # ->90° en rango lejano. Es la variable de la que depende el backscatter y con
-        # la que se bina el AVG. Con `ground` ya corregido de slant-range, sale directo
-        # de la altura sobre el fondo.
+        # Incidence angle on the bottom, from vertical: 0° at nadir, ->90° at far range.
+        # This is the variable backscatter depends on and the one AVG bins by.
         theta = np.degrees(np.arctan2(ground, h))
 
         valid_mask = ground > BLIND_ZONE
@@ -352,14 +349,14 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=
     ang_all  = np.concatenate(buf_ang)
     port_all = np.concatenate(buf_port)
 
-    rospy.loginfo(f"Muestras SSS: {len(int_all)} "
+    rospy.loginfo(f"SSS samples: {len(int_all)} "
                   f"({port_all.sum()} port / {(~port_all).sum()} stbd)")
 
     if apply_avg:
         corrected, info = angle_varying_gain(int_all, ang_all, port_all)
 
         if corrected is None:
-            rospy.logwarn("AVG: pocos bins válidos; mosaico sin corregir.")
+            rospy.logwarn("AVG: too few valid bins; mosaic left uncorrected.")
         else:
             int_all = corrected
             gains, valid, _, g0, g_floor = info
@@ -367,16 +364,16 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=
             for name in ("port", "stbd"):
                 gv = gains[name][valid[name]]
                 rospy.loginfo(
-                    f"AVG {name}: ganancia {gv.min():.2f}-{gv.max():.2f} "
-                    f"(x{gv.max() / max(gv.min(), 1e-3):.0f}) sobre {valid[name].sum()} bins"
+                    f"AVG {name}: gain {gv.min():.2f}-{gv.max():.2f} "
+                    f"(x{gv.max() / max(gv.min(), 1e-3):.0f}) over {valid[name].sum()} bins"
                 )
 
             rospy.loginfo(
-                f"AVG: g0={g0:.2f}, suelo de ganancia {g_floor:.2f} "
-                f"(boost máx x{max(gains[n][valid[n]].max() for n in ('port','stbd')) / g_floor:.0f})"
+                f"AVG: g0={g0:.2f}, gain floor {g_floor:.2f} "
+                f"(max boost x{max(gains[n][valid[n]].max() for n in ('port','stbd')) / g_floor:.0f})"
             )
 
-    # Media por celda. bincount en vez de np.add.at: mismo resultado, mucho más rápido.
+    # Per-cell mean. bincount rather than np.add.at: same result, much faster.
     grid = np.bincount(idx_all, weights=int_all, minlength=width * height)
     cnt  = np.bincount(idx_all, minlength=width * height)
 
@@ -393,7 +390,7 @@ def main():
     bag_file = rospy.get_param('~bag_file', '')
     output_dir = rospy.get_param('~output_dir', '.')
     nav_topic = rospy.get_param('~nav_topic', '/sparus2/navigator/navigation')
-    apply_avg = rospy.get_param('~apply_avg', True)   # corrección AVG por ángulo
+    apply_avg = rospy.get_param('~apply_avg', True)   # angle-varying gain correction
 
     if not bag_file:
         rospy.logerr("ERROR: bag_file not provided")
@@ -406,7 +403,7 @@ def main():
         os.makedirs(d, exist_ok=True)
 
     output_tiff = os.path.join(tif_dir, 'sss_mosaic.tif')
-    # PNG y no JPG: el fondo sin dato va TRANSPARENTE y JPEG no tiene canal alfa.
+    # PNG rather than JPG: the no-data background is TRANSPARENT and JPEG has no alpha.
     output_png  = os.path.join(images_dir, 'sss_mosaic.png')
 
     bag = rosbag.Bag(bag_file)
@@ -428,11 +425,11 @@ def main():
         'sparus2/sidescan_starboard'
     )
 
-    # Rango por canal: del bag (SSSConfig), no hardcodeado. Ver SONAR_RANGE_FALLBACK.
+    # Per-channel range: read from the bag (SSSConfig), not hardcoded. See SONAR_RANGE_FALLBACK.
     sonar_range = float(rospy.get_param('~sonar_range', 0.0)) or get_sonar_range(bag)
 
-    rospy.loginfo(f"Rango por canal: {sonar_range:.1f} m "
-                  f"({sonar_range / 2000.0 * 1000:.2f} mm/muestra a 2000 muestras)")
+    rospy.loginfo(f"Per-channel range: {sonar_range:.1f} m "
+                  f"({sonar_range / 2000.0 * 1000:.2f} mm/sample at 2000 samples)")
 
     img, x_min, y_max = process_mosaic(
         bag,
@@ -453,10 +450,10 @@ def main():
 
     img8 = enhance_data(img)
 
-    # El CLAHE de enhance_data levanta el fondo vacío por encima de 0, así que el 0
-    # deja de significar "sin dato" y contamina el histograma y el JPG. Reservamos el
-    # 0 para nodata: fondo a 0, celdas con dato a >=1. mb_sss_mosaic_fusion.py usa
-    # `sss_g > 0` como máscara de validez, así que es justo lo que espera.
+    # enhance_data's CLAHE lifts the empty background above 0, so 0 would stop meaning
+    # "no data" and would pollute the histogram and the JPG. 0 is reserved for nodata:
+    # background to 0, filled cells to >=1, which is what mb_sss_mosaic_fusion.py expects
+    # from `sss_g > 0`.
     filled = img > 0
     img8[filled] = np.maximum(img8[filled], 1)
     img8[~filled] = 0
@@ -480,14 +477,11 @@ def main():
 
     rospy.loginfo(f"GeoTIFF generated: {output_tiff}")
 
-    # PNG del mosaico (visualización) en results/images/. Misma rampa viridis que
-    # mb_intensity.jpg, para comparar los dos backscatter a ojo. El fondo sin dato va
-    # con alfa=0 (transparente), no pintado: así solo se ve la proyección de los datos
-    # sobre lo que haya debajo. Por eso es PNG y no JPG — JPEG no tiene canal alfa.
+    # Mosaic PNG for visualization, on the same viridis ramp as mb_intensity.jpg so the
+    # two backscatters can be compared by eye. No-data background gets alpha=0.
     color = cv2.applyColorMap(img8, cv2.COLORMAP_VIRIDIS)      # BGR
-    # El RGB de debajo del alfa también se pone a 0. Si no, queda el morado de
-    # viridis(0) ahí escondido y cualquier visor que ignore el canal alfa (o cualquier
-    # aplanado sobre fondo) vuelve a pintar el fondo morado.
+    # The RGB under the alpha is zeroed too. Otherwise viridis(0)'s purple stays hidden
+    # there, and any viewer that ignores alpha (or any flattening) paints it back.
     color[~filled] = 0
     alpha = np.where(filled, 255, 0).astype(np.uint8)
     bgra = np.dstack([color, alpha])
@@ -496,7 +490,7 @@ def main():
 
     rospy.loginfo(
         f"SSS mosaic PNG saved: {output_png} "
-        f"({filled.mean() * 100:.1f}% de píxeles con dato, resto transparente)"
+        f"({filled.mean() * 100:.1f}% of pixels with data, rest transparent)"
     )
 
     pub_sss_done = rospy.Publisher('/pipeline/sss_done', Bool, queue_size=1, latch=True)

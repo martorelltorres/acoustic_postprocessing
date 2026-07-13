@@ -1,12 +1,12 @@
 <launch>
     <!-- Acoustic post-processing pipeline.
          Toggle each product with its enable_* flag; nodes run only when true.
-         Los productos se agrupan por tipo dentro de output_dir (ver results/README.md):
+         Products are grouped by type inside output_dir (see results/README.md):
            enable_mb_cloud       -> pointcloud/mb_pointcloud.xyz + tif/mb_pointcloud.tif
                                     + images/mb_pointcloud.jpg + mesh/mb_mesh.ply
-           enable_mb_intensity   -> tif/mb_intensity.tif (paleta viridis)
+           enable_mb_intensity   -> tif/mb_intensity.tif (viridis palette)
                                     + images/mb_intensity.jpg + pointcloud/mb_intensity.xyz
-           enable_sss_mosaic     -> tif/sss_mosaic.tif + images/sss_mosaic.png (fondo alfa=0)
+           enable_sss_mosaic     -> tif/sss_mosaic.tif + images/sss_mosaic.png (alpha=0 bg)
            enable_sss_waterfall  -> images/sss_waterfall.png
            enable_mosaic_fusion  -> tif/mb_sss_mosaic.tif (needs mb_intensity + sss_mosaic)
            enable_fusion         -> mesh/mb_textured_sss.ply (needs mb_mesh + sss_mosaic) -->
@@ -35,102 +35,82 @@
     <arg name="enable_fusion"        default="true"/>
 
     <!-- Multibeam cloud/mesh params -->
-    <!-- voxel_size 0.05 (era 0.01): a 1 cm la nube tenía ~31 M puntos, el SOR y el
-         Poisson depth=11 consumían 55 GB y el nodo moría por OOM sin generar malla.
-         0.05 m deja ~1-3 M puntos, sobra para batimetría del fondo. -->
     <arg name="voxel_size"   default="0.05"/>
     <arg name="sor_k"        default="50"/>
     <arg name="sor_std"      default="1.0"/>
-    <!-- angle_cutoff 55 (era 60): los haces >55° del nadir son rasantes y ruidosos
-         (curl del borde de la franja ~+0.14 m a 50-60°); recortarlos limpia las
-         "montañas" espurias de la nube sin perder cobertura útil. -->
     <arg name="angle_cutoff" default="55.0"/>
-    <!-- Frame en el que se mide angle_cutoff. 'sensor' era el comportamiento viejo:
-         medía el ángulo del haz respecto a la vertical DEL SENSOR, antes de aplicar
-         roll/pitch. Con el vehículo alabeado eso deja pasar haces mucho más rasantes
-         de lo que el umbral promete (roll 10° + cutoff 55° -> 65° reales). Medido en
-         13_52_22: 548.600 pts (2.26%) superaban los 55° REALES pese a pasar el cutoff,
-         con tasa de error 13.6%; los que pasaban de 60° reales, 47.4%. 'world' mide
-         tras rotar, así que el cutoff significa lo que dice. -->
     <arg name="angle_cutoff_frame" default="world"/>
 
-    <!-- ============== Gating por ACTITUD (descarte de virajes) ==============
-         En viraje la franja se proyecta como un abanico inclinado que no casa con las
-         pasadas vecinas. No hay corrección geométrica a posteriori sin registrar
-         franjas (eso es el SLAM), así que se descarta el ping ENTERO.
+    <!-- ============== ATTITUDE gating (drop turns) ==============
+         During a turn the swath projects as a tilted fan that does not match the
+         neighbouring passes. There is no post-hoc geometric fix short of registering
+         swaths (that is the SLAM), so the WHOLE ping is dropped.
 
-         Medido sobre el bag 13_52_22 (lawnmower), fracción de puntos que caen fuera de
-         la superficie de referencia:
-             |roll-sesgo| <1°: 2.1%   3-5°: 13.1%   8-12°: 26.3%   >12°: 33.7%
+         Measured on bag 13_52_22, fraction of points falling off the reference surface:
+             |roll-bias| <1°: 2.1%   3-5°: 13.1%   8-12°: 26.3%   >12°: 33.7%
              |yaw_rate| <1°/s: 2.4%   6-10°/s: 10.4%   10-15°/s: 17.9%
-         El roll es el mejor predictor (Pearson +0.54 con |roll-sesgo|; +0.41 con
-         yaw-rate; +0.10 con pitch — el pitch aquí es sesgo de vuelo, no señal de giro).
+         Roll is the best predictor (Pearson +0.54, vs +0.41 for yaw-rate).
 
-         ALCANCE REAL: los pings con actitud extrema son POCOS, así que el gate tiene
-         poca palanca. Con los defaults (roll 5°, yaw-rate 8°/s) se descarta ~7% de los
-         puntos y se elimina ~30% de los malos; el 70% restante viene de pings con
-         actitud nominal y lo sigue cazando surface_relative_filter. Bajar max_roll_deg
-         a 3° sube al ~28% de malos eliminados por ese gate solo, a costa de cobertura.
+         Leverage is limited: extreme-attitude pings are few. With the defaults it drops
+         ~7% of the points and removes ~30% of the bad ones; the other 70% come from pings
+         with nominal attitude and are caught by surface_relative_filter instead.
 
-         roll_bias_deg: sesgo de trim del roll. NaN = estimarlo como la mediana del roll
-         del bag (~+2° en estos). El gate umbrala la EXCURSIÓN respecto al sesgo, no el
-         roll absoluto: un roll constante lo modela bien la matriz de rotación y no
-         estropea la proyección. Cualquier umbral <=0 desactiva ese gate. -->
+         roll_bias_deg: roll trim bias. NaN = estimate it as the median roll of the bag
+         (~+2° in these). The gate thresholds the EXCURSION about that bias, not absolute
+         roll: a constant roll is modelled fine by the rotation matrix. Any threshold
+         <= 0 disables that gate. -->
     <arg name="max_roll_deg"       default="5.0"/>
     <arg name="max_yaw_rate_deg_s" default="8.0"/>
     <arg name="roll_bias_deg"      default="NaN"/>
 
-    <!-- Filtro de outliers RELATIVO A LA SUPERFICIE (no k-NN): quita los picos
-         verticales de haces con rango erróneo / curl de bordes que el SOR no caza y
-         que producen las montañas y radios espurios que se ven en CloudCompare.
-         Descarta puntos cuya Z se aparta > nmad*MAD de la mediana de su celda XY
-         (adaptativo: respeta el relieve rocoso real). nmad<=0 lo desactiva. -->
+    <!-- SURFACE-RELATIVE outlier filter (not k-NN): removes the vertical spikes from
+         bad-range beams and edge curl that SOR misses and that show up as spurious
+         mountains in CloudCompare. Drops points whose Z departs more than nmad*MAD from
+         the median of their XY cell (adaptive, so real rocky relief survives).
+         nmad <= 0 disables it. -->
     <arg name="surf_filter_cell"  default="0.5"/>
     <arg name="surf_filter_nmad"  default="3.0"/>
     <arg name="surf_filter_floor" default="0.3"/>
     <arg name="surf_filter_iters" default="2"/>
-    <!-- Profundidad de la reconstrucción Poisson. depth 11 dispara la RAM; a
-         voxel 0.05 m, depth 10 da resolución de sobra sin reventar memoria. -->
+    <!-- Poisson reconstruction depth. depth 11 blows up RAM; at voxel 0.05 m, depth 10
+         is more than enough resolution. -->
     <arg name="poisson_depth" default="10"/>
-    <!-- Resolución (m/celda) del DEM batimétrico rasterizado (mb_pointcloud.tif). -->
+    <!-- Resolution (m/cell) of the rasterized bathymetric DEM (mb_pointcloud.tif). -->
     <arg name="dem_res" default="0.10"/>
-    <!-- Offset extra Y del lever-arm MB->SSS (ajuste empírico para cuadrar con el
-         mosaico SSS). Debe ser igual en cloud e intensity. 0 = sin corrimiento. -->
+    <!-- Extra Y offset of the MB->SSS lever arm (empirical, to line up with the SSS
+         mosaic). Must match between cloud and intensity. 0 = no shift. -->
     <arg name="mb_sss_extra_offset_y" default="-2.0"/>
 
     <!-- Multibeam intensity params -->
     <arg name="mb_intensity_res"   default="0.10"/>
     <arg name="mb_intensity_cloud" default="true"/>
-    <!-- Corrección AVG (Angle Varying Gain): quita el banding por ángulo de
-         incidencia del backscatter. Portada del SLAM. -->
+    <!-- AVG (Angle Varying Gain) correction: removes the incidence-angle banding from
+         the backscatter. Ported from the SLAM. -->
     <arg name="mb_apply_avg"       default="true"/>
 
     <!-- Sidescan params -->
-    <!-- AVG del sidescan, portado de multibeam_intensity.py. Sin él, sss_mosaic.tif
-         conserva el patrón brillante-en-nadir / oscuro-en-rango-lejano, que es
-         geometría del sonar y no tipo de fondo: domina el contraste del mosaico y de
-         la malla texturizada mb_textured_sss.ply. sss2mosaic.py ya corregía el
-         slant-range (geometría de posición), pero no la ganancia angular.
-         Perfil SEPARADO por banda (port/stbd, transductores distintos) y escala COMÚN,
-         para quitar de paso el desbalance entre bandas. -->
+    <!-- Sidescan AVG, ported from multibeam_intensity.py. Without it sss_mosaic.tif
+         keeps the bright-at-nadir / dark-at-far-range pattern, which is sonar geometry
+         rather than bottom type, and it dominates the contrast of both the mosaic and the
+         textured mesh. sss2mosaic.py already corrected slant-range, but not angular gain.
+         The profile is computed PER BAND (port/stbd are different transducers) on a
+         COMMON scale, which also removes the imbalance between bands. -->
     <arg name="sss_apply_avg"      default="true"/>
-    <!-- Rango por canal del sidescan (m). 0 = LEERLO DEL BAG (mensajes SSSConfig del
-         topic .../raw_data/<side>/sss_info, campo `range`). El código tenía un
-         SONAR_RANGE=30.0 hardcodeado que era FALSO para los bags de Andratx (range real
-         = 50.0 m en las 1561 pings de ambas bandas): colocaba cada muestra al 60% de su
-         rango verdadero. Al corregirlo la huella útil pasa de 72.3x71.5 m a 104.9x92.0 m.
-         Solo poner un valor > 0 si el bag no trae SSSConfig. -->
+    <!-- Sidescan per-channel range (m). 0 = READ IT FROM THE BAG (SSSConfig messages on
+         .../raw_data/<side>/sss_info, field `range`). The old hardcoded SONAR_RANGE=30.0
+         was WRONG for the Andratx bags (real range 50.0 m), placing every sample at 60%
+         of its true range; fixing it grew the footprint from 72.3x71.5 m to 104.9x92.0 m.
+         Only set a value > 0 when the bag carries no SSSConfig. -->
     <arg name="sss_sonar_range"    default="0.0"/>
 
     <!-- Mosaic fusion mode: max | mean | mb | sss -->
     <arg name="mosaic_fusion_mode" default="max"/>
 
-    <!-- Segundos que los nodos de fusión esperan las señales /pipeline/*_done de sus
-         productores antes de tirar de lo que haya en disco. fusion_node depende de
-         mb_done, que multibeam_processor.py publica DESPUÉS del Poisson (~9 min): con
-         los 600 s de antes iba muy justo, y si se baja voxel_size no llega. 0 desactiva
-         la espera. Ojo: si matas el launch antes de que acabe el Poisson, mb_done no se
-         publica nunca y fusion_node se queda esperando sin generar mb_textured_sss.ply. -->
+    <!-- Seconds the fusion nodes wait for their producers' /pipeline/*_done signals
+         before falling back to whatever is on disk. fusion_node depends on mb_done, which
+         multibeam_processor.py publishes AFTER the Poisson (~9 min), so the previous 600 s
+         was too tight. 0 disables the wait. Note: kill the launch before the Poisson ends
+         and mb_done never fires, leaving fusion_node waiting forever. -->
     <arg name="fusion_wait_timeout" default="1800.0"/>
 
     <!-- Bags are read directly (not played), so no /clock is published.

@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-GIF de la fusión MB + SSS: el relieve 3D del multihaz se tiñe con la intensidad del
-sidescan mientras la cámara orbita.
+MB + SSS fusion GIF: the multibeam 3D relief is tinted with sidescan intensity while the
+camera orbits.
 
-Salida: results/media/07_mb_sss_fusion.gif
+Output: results/media/07_mb_sss_fusion.gif
 
-Tres actos: la batimetría desnuda, un frente que barre el relieve proyectando la
-intensidad del sidescan, y la fusión completa.
+Three acts: bare bathymetry, a front sweeping across the relief projecting the sidescan
+intensity, and the complete fusion.
 
-POR QUÉ OPEN3D Y NO MATPLOTLIB: matplotlib 3D no tiene z-buffer (Poly3DCollection
-ordena las caras con el algoritmo del pintor) y pinta caras traseras encima de las
-delanteras. Open3D rasteriza con GL. Se usa el Visualizer legacy con `visible=False`:
-el OffscreenRenderer de filament renderiza bien pero deja el proceso colgado al salir.
-Solo se puede crear UNA ventana por proceso: tras destroy_window(), GLFW no reinicia.
+WHY OPEN3D AND NOT MATPLOTLIB: matplotlib 3D has no z-buffer (Poly3DCollection sorts faces
+with the painter's algorithm) and draws back faces over front ones. Open3D rasterizes with
+GL. The legacy Visualizer is used with `visible=False`: filament's OffscreenRenderer
+renders fine but leaves the process hanging on exit. Only ONE window can be created per
+process — after destroy_window(), GLFW does not restart.
 
-POR QUÉ EL DEM Y NO mb_mesh.ply: la malla Poisson interpola la nube cruda, y a 20 cm
-es ruidosa — sale un fondo erizado, con agujeros donde la malla no es manifold. El DEM
-es la MEDIANA de ~100 puntos por celda de 10 cm: misma geometría multihaz, estimador
-mucho mejor, y una rejilla regular se triangula sin agujeros. La intensidad del SSS se
-muestrea igual que en sss_mb_fusion.py, así que la fusión es la misma.
+WHY THE DEM AND NOT mb_mesh.ply: the Poisson mesh interpolates the raw cloud and is noisy
+at 20 cm — a bristly seafloor with holes where the mesh is not manifold. The DEM is the
+MEDIAN of ~100 points per 10 cm cell: same multibeam geometry, far better estimator, and a
+regular grid triangulates without holes. SSS intensity is sampled exactly as in
+sss_mb_fusion.py, so the fusion is the same.
 
-Uso:  python3 make_fusion_gif.py [results_dir]
+Usage:  python3 make_fusion_gif.py [results_dir]
 
 Author: Antoni Martorell (SRV, UIB)
 """
@@ -41,21 +41,21 @@ from make_media import PAGE, INK, INK2, MUTED, CREDIT, CMAP_DEPTH, CMAP_BS, \
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 W = H = 800
-# SIN exageración vertical. El DEM tiene saltos reales de hasta 0.8 m entre celdas
-# contiguas de 0.25 m (pendiente p99 de 73 grados) en la mitad este: es el "fanning" por
-# actitud del vehículo, documentado, y solo lo corrige el SLAM. No es ruido de alta
-# frecuencia: ni una mediana 5x5, ni despiking, ni engordar la celda a 0.30 m lo bajan.
-# Exagerar la vertical lo convertía en un bosque de agujas de 2 m que no existe. A x1.0
-# el relieve de 6.5 m sobre 55 m ya se lee, y lo que se ve es lo que hay.
+# NO vertical exaggeration. The DEM has real 0.8 m steps between adjacent 0.25 m cells
+# (p99 slope of 73°) in its eastern half: that is the documented attitude "fanning", and
+# only the SLAM fixes it. It is not high-frequency noise — neither a 5x5 median, nor
+# despiking, nor a 0.30 m cell brings it down. Exaggerating the vertical turned it into a
+# forest of 2 m needles that does not exist. At x1.0 the 6.5 m of relief over 55 m still
+# reads, and what you see is what is there.
 VERT_EXAG = 1.0
 FPS = 16
 
-ACT1 = 22             # órbita con la batimetría desnuda
-ACT2 = 42             # el sidescan barre y se proyecta
-ACT3 = 30             # órbita con la fusión completa
+ACT1 = 22             # orbit over the bare bathymetry
+ACT2 = 42             # the sidescan sweeps across and is projected
+ACT3 = 30             # orbit over the complete fusion
 TOTAL = ACT1 + ACT2 + ACT3
 
-NO_SSS = np.array([0.16, 0.16, 0.15])   # gris neutro: fuera de la franja del sidescan
+NO_SSS = np.array([0.16, 0.16, 0.15])   # neutral gray: outside the sidescan swath
 
 
 def hex2rgb(h):
@@ -64,27 +64,25 @@ def hex2rgb(h):
 
 
 def dem_surface(dem_tif, erode_px=10, smooth=0.8, spike_m=0.35):
-    """DEM raster -> (vértices XYZ en UTM, triángulos). Solo celdas con dato."""
+    """DEM raster -> (XYZ vertices in UTM, triangles). Cells with data only."""
     dem, ext = crop_to_data(*load_raster(dem_tif))
     finite = np.isfinite(dem)
 
-    # El flanco del DEM es un fleco de celdas de un solo ping con Z ruidosa: a 1.9x de
-    # exageración vertical sale como un bosque de agujas. Erosionar no basta, porque el
-    # fleco viene en grumos conectados: primero se APERTURA (mata hebras y motas) y se
-    # rellenan los huecos interiores, y luego sí se erosiona la orilla.
+    # The DEM's flank is a fringe of single-ping cells with noisy Z. Eroding is not enough
+    # because the fringe comes in connected clumps: OPEN first (kills threads and specks),
+    # fill the interior holes, and only then erode the shore.
     core = binary_fill_holes(binary_opening(finite, iterations=3))
     valid = binary_erosion(core, iterations=erode_px)
 
-    # Relleno por VECINO MÁS CERCANO, no por la mediana global: si no, el suavizado
-    # arrastra los bordes hacia la mediana y levanta un labio dentado en la orilla.
+    # NEAREST-NEIGHBOUR fill, not the global median: otherwise the smoothing drags the
+    # borders towards the median and raises a jagged lip along the shore.
     idx = distance_transform_edt(~finite, return_distances=False, return_indices=True)
 
-    # DESPIKING contra la mediana local: el equivalente ráster de surface_relative_filter.
-    # La mitad este del DEM tiene celdas de un solo ping (curl de los haces exteriores):
-    # medido, el salto de Z entre celdas contiguas de 10 cm llega a 0.84 m en el p99, o
-    # sea 83 grados de pendiente. Eso no es relieve, es ruido, y a 1.9x de exageración
-    # sale como un bosque de agujas. Ni el gaussiano ni una mediana 5x5 lo quitan (el
-    # ruido está correlacionado en más de media celda): hay que sustituir el valor.
+    # DESPIKING against the local median: the raster equivalent of surface_relative_filter.
+    # The eastern half of the DEM has single-ping cells (outer-beam curl) where the Z step
+    # between adjacent 10 cm cells reaches 0.84 m at p99, i.e. 83° of slope. That is noise,
+    # not relief, and neither the gaussian nor a 5x5 median removes it (the noise is
+    # correlated over more than half a cell) — the value has to be replaced.
     z = dem[tuple(idx)]
     for _ in range(2):
         med = median_filter(z, size=5)
@@ -98,14 +96,14 @@ def dem_surface(dem_tif, erode_px=10, smooth=0.8, spike_m=0.35):
 
     ny, nx = dem.shape
     xs = np.linspace(ext[0], ext[1], nx)
-    ys = np.linspace(ext[3], ext[2], ny)          # fila 0 = norte
+    ys = np.linspace(ext[3], ext[2], ny)          # row 0 = north
     X, Y = np.meshgrid(xs, ys)
 
     idx = -np.ones((ny, nx), np.int64)
     idx[valid] = np.arange(valid.sum())
     verts = np.column_stack([X[valid], Y[valid], z[valid]])
 
-    # Un quad -> dos triángulos, solo si sus cuatro esquinas tienen dato.
+    # One quad -> two triangles, only when all four corners have data.
     q = valid[:-1, :-1] & valid[:-1, 1:] & valid[1:, :-1] & valid[1:, 1:]
     a, b = idx[:-1, :-1][q], idx[:-1, 1:][q]
     c, d = idx[1:, :-1][q], idx[1:, 1:][q]
@@ -115,7 +113,7 @@ def dem_surface(dem_tif, erode_px=10, smooth=0.8, spike_m=0.35):
 
 
 def sample_sss(verts, sss_tif):
-    """Intensidad del sidescan en cada vértice (x, y). Devuelve (intensidad, válido)."""
+    """Sidescan intensity at each vertex (x, y). Returns (intensity, valid)."""
     with rasterio.open(sss_tif) as src:
         a = src.read(1)
         nodata = src.nodata
@@ -142,8 +140,8 @@ def build_colors(verts, sss_tif):
 
     val, valid = sample_sss(verts, sss_tif)
 
-    # La rampa gris llega casi a negro y la iluminación de Open3D la apaga del todo:
-    # se comprime al tramo [0.18, 1.0], que en pantalla sigue siendo backscatter bajo.
+    # The gray ramp reaches almost black and Open3D's lighting kills it entirely, so it is
+    # compressed into [0.18, 1.0], which on screen still reads as low backscatter.
     ilo, ihi = np.percentile(val[valid], (2, 98))
     norm = np.clip((val - ilo) / max(ihi - ilo, 1e-6), 0, 1)
     sss_rgb = CMAP_BS(0.18 + 0.82 * norm)[:, :3]
@@ -189,13 +187,13 @@ def main():
     os.makedirs(out, exist_ok=True)
 
     verts, tris = dem_surface(os.path.join(res, "tif", "mb_pointcloud.tif"))
-    print(f"[fusion] superficie: {len(verts):,} vértices, {len(tris):,} triángulos")
+    print(f"[fusion] surface: {len(verts):,} vertices, {len(tris):,} triangles")
 
     depth_rgb, sss_rgb, valid = build_colors(verts, os.path.join(res, "tif", "sss_mosaic.tif"))
     cover = float(valid.mean())
-    print(f"[fusion] con dato SSS: {valid.sum():,} ({cover * 100:.1f}%)")
+    print(f"[fusion] with SSS data: {valid.sum():,} ({cover * 100:.1f}%)")
 
-    # Centrado: en UTM las coords son ~4.4e6 y el z-buffer pierde precisión.
+    # Centered: UTM coordinates are ~4.4e6 and the z-buffer loses precision.
     c = verts.mean(axis=0)
     v = verts - c
     v[:, 2] *= VERT_EXAG
@@ -216,8 +214,8 @@ def main():
     opt.mesh_show_back_face = True
 
     ctr = vis.get_view_control()
-    # FOV al mínimo (5 grados) = casi ortográfico. Con los 60 por defecto y la cámara
-    # cerca, el relieve se deformaba y parecía un cañón.
+    # FOV at its minimum (5°) = near-orthographic. At the default 60° with the camera
+    # close, the relief warped and looked like a canyon.
     ctr.change_field_of_view(step=-90)
     frames = []
 
@@ -256,7 +254,7 @@ def main():
     pil[0].save(gif, save_all=True, append_images=pil[1:],
                 duration=int(1000 / FPS), loop=0, optimize=True)
 
-    print(f"[fusion] listo -> {gif}  ({len(frames)} frames, {W}x{H})")
+    print(f"[fusion] done -> {gif}  ({len(frames)} frames, {W}x{H})")
     return 0
 
 

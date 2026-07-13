@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Genera las entradas de make_pipeline_animation.py a partir de results/.
+Builds the inputs of make_pipeline_animation.py from results/.
 
-Salidas:
+Outputs:
   results/anim_data/stages.npz      V, T, inten, cloud
   results/anim_data/footprints.npz  mb_traj, sss_traj
 
-Uso:  python3 make_anim_data.py [results_dir]
+Usage:  python3 make_anim_data.py [results_dir]
 
-DOS RESTRICCIONES QUE IMPONE EL CONSUMIDOR (make_pipeline_animation.py):
+TWO CONSTRAINTS IMPOSED BY THE CONSUMER (make_pipeline_animation.py):
 
-1. DECIMAR LA MALLA. Las etapas 3 y 4 construyen un `Poly3DCollection` con todos los
-   triángulos en CADA uno de sus 100 fotogramas, y matplotlib 3D los ordena por
-   profundidad a mano en cada dibujado. Con los 335 000 triángulos de la superficie real
-   no termina. Se muestrea el DEM a ~0.9 m, que deja unos pocos miles.
+1. DECIMATE THE MESH. Stages 3 and 4 build a `Poly3DCollection` with every triangle on
+   EACH of their 100 frames, and matplotlib 3D depth-sorts them by hand on every draw.
+   With the 335,000 triangles of the real surface it never finishes. The DEM is sampled
+   at ~0.9 m, which leaves a few thousand.
 
-2. ORDENAR LA NUBE POR LA MISIÓN. La etapa 2 dibuja `cloud[:n]` creciendo, así que el
-   ORDEN de las filas es lo que se ve. `mb_pointcloud.xyz` sale de un voxel_down_sample
-   de Open3D y NO está ordenado por tiempo (medido: la distancia entre puntos
-   consecutivos tiene mediana 0.40 m pero p90 6.8 m y máximo 51 m; son saltos de voxel).
-   Sin reordenar, la nube aparece como moteado disperso en vez de construirse a lo largo
-   de la trayectoria. Se ordena por el índice del fix de navegación más cercano.
+2. ORDER THE CLOUD ALONG THE MISSION. Stage 2 draws a growing `cloud[:n]`, so the ROW
+   ORDER is what the viewer sees. `mb_pointcloud.xyz` comes out of an Open3D
+   voxel_down_sample and is NOT time-ordered (consecutive points: median gap 0.40 m but
+   p90 6.8 m, max 51 m — those are voxel jumps). Unsorted, the cloud shows up as scattered
+   speckle instead of building along the track, so rows are sorted by the index of the
+   nearest navigation fix.
 
 Author: Antoni Martorell (SRV, UIB)
 """
@@ -38,13 +38,13 @@ from make_media import load_raster, crop_to_data
 
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-CELL_M = 0.9        # m/celda de la malla decimada
-N_CLOUD = 25000     # puntos de la nube en la etapa 2
-N_TRAJ = 1500       # fixes por trayectoria en la etapa 1
+CELL_M = 0.9        # m/cell of the decimated mesh
+N_CLOUD = 25000     # cloud points in stage 2
+N_TRAJ = 1500       # fixes per trajectory in stage 1
 
 
 def coarse_surface(dem_tif, cell_m=CELL_M):
-    """DEM raster -> (V, T) decimado a `cell_m`, sin el fleco dentado del borde."""
+    """DEM raster -> (V, T) decimated to `cell_m`, without the jagged border fringe."""
     dem, ext = crop_to_data(*load_raster(dem_tif))
     finite = np.isfinite(dem)
 
@@ -77,8 +77,8 @@ def coarse_surface(dem_tif, cell_m=CELL_M):
 
 
 def sample_sss(pts_xy, sss_tif):
-    """Intensidad del sidescan en cada (x, y). 0 = fuera de la franja (el consumidor
-    usa `face_i > 0` como máscara de cobertura)."""
+    """Sidescan intensity at each (x, y). 0 = outside the swath (the consumer uses
+    `face_i > 0` as its coverage mask)."""
     with rasterio.open(sss_tif) as src:
         a = src.read(1)
         nodata = src.nodata
@@ -97,7 +97,7 @@ def sample_sss(pts_xy, sss_tif):
 
 
 def ordered_cloud(xyz_file, traj_xy, n=N_CLOUD, seed=0):
-    """Submuestrea la nube y la ORDENA por el fix de navegación más cercano."""
+    """Subsamples the cloud and ORDERS it by the nearest navigation fix."""
     pts = np.loadtxt(xyz_file)
 
     rng = np.random.default_rng(seed)
@@ -112,8 +112,8 @@ def load_nav(res):
     cache = os.path.join(res, "media", ".nav_cache.npz")
     if not os.path.isfile(cache):
         raise SystemExit(
-            f"Falta {cache}. Lo genera la extracción de navegación de make_media.py; "
-            "sin él no hay trayectorias para la etapa 1.")
+            f"{cache} is missing. It is produced by the navigation extraction in "
+            "make_media.py; without it there are no trajectories for stage 1.")
 
     d = np.load(cache)
     return d
@@ -134,10 +134,10 @@ def main():
     xyz = os.path.join(res, "pointcloud", "mb_pointcloud.xyz")
 
     V, T = coarse_surface(dem_tif)
-    print(f"[anim-data] malla decimada a {CELL_M} m: {len(V):,} vértices, {len(T):,} triángulos")
+    print(f"[anim-data] mesh decimated to {CELL_M} m: {len(V):,} vertices, {len(T):,} triangles")
 
     inten = sample_sss(V[:, :2], sss_tif)
-    print(f"[anim-data] intensidad SSS: {(inten > 0).sum():,} vértices con dato "
+    print(f"[anim-data] SSS intensity: {(inten > 0).sum():,} vertices with data "
           f"({(inten > 0).mean() * 100:.1f}%)")
 
     nav = load_nav(res)
@@ -145,18 +145,18 @@ def main():
     sss_traj = np.column_stack([nav["xs"], nav["ys"]])
 
     cloud = ordered_cloud(xyz, mb_traj)
-    print(f"[anim-data] nube: {len(cloud):,} puntos, ordenados a lo largo de la misión")
+    print(f"[anim-data] cloud: {len(cloud):,} points, ordered along the mission")
 
     mb_traj = decimate(mb_traj, N_TRAJ)
     sss_traj = decimate(sss_traj, N_TRAJ)
-    print(f"[anim-data] trayectorias: MB {len(mb_traj):,}, SSS {len(sss_traj):,}")
+    print(f"[anim-data] trajectories: MB {len(mb_traj):,}, SSS {len(sss_traj):,}")
 
     np.savez_compressed(os.path.join(out, "stages.npz"),
                         V=V, T=T, inten=inten, cloud=cloud)
     np.savez_compressed(os.path.join(out, "footprints.npz"),
                         mb_traj=mb_traj, sss_traj=sss_traj)
 
-    print(f"[anim-data] listo -> {out}")
+    print(f"[anim-data] done -> {out}")
     return 0
 
 

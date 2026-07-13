@@ -77,10 +77,10 @@ def main():
     rospy.Subscriber('/pipeline/mb_intensity_done', Bool, mb_callback)
     rospy.Subscriber('/pipeline/sss_done', Bool, sss_callback)
 
-    # OJO: el `timeout > 0` iba DENTRO de la condición de break, así que un timeout=0
-    # no desactivaba la espera: la hacía infinita. Se comprueba antes del bucle.
+    # Checked before the loop: `timeout > 0` used to live inside the break condition,
+    # so timeout=0 made the wait infinite instead of disabling it.
     if timeout <= 0:
-        rospy.loginfo("wait_timeout<=0: no se esperan señales, se leen los .tif de disco.")
+        rospy.loginfo("wait_timeout<=0: skipping signals, reading the .tif from disk.")
     else:
         rospy.loginfo("Waiting for MB intensity + SSS mosaics (timeout %.0fs)..." % timeout)
 

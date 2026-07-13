@@ -2,10 +2,10 @@
 from distutils.core import setup
 from catkin_pkg.python_setup import generate_distutils_setup
 
-# Genera los metadatos necesarios para que Catkin sepa que es un paquete Python
+# Generates the metadata Catkin needs to treat this as a Python package
 d = generate_distutils_setup(
-    # La lista de carpetas que contienen módulos/librerías Python.
-    # Si tus scripts principales están en 'scripts/', puedes omitir 'packages'
+    # Folders holding Python modules. Can be omitted when the entry points
+    # live in 'scripts/'.
     # packages=['pointcloud_lib'], 
     # package_dir={'': 'src'}
 )
