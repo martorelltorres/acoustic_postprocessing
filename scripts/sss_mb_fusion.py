@@ -48,9 +48,13 @@ def main():
     output_mesh = os.path.join(mesh_dir, "mb_textured_sss.ply")
     COLORMAP = cm.gray
     NODATA_VALUE = 0
+    # Color de los vértices que caen FUERA de la franja del sidescan. Un rojo apagado
+    # y no un gris: con cm.gray un gris cualquiera se confundiría con backscatter real,
+    # y el negro se confunde con backscatter bajo.
+    NO_SSS_COLOR = (0.45, 0.12, 0.12)
 
     # Max seconds to wait for the upstream producers before falling back to
-    # whatever already exists on disk (0 disables the wait entirely).
+    # whatever already exists on disk. <=0 salta la espera y lee de disco.
     wait_timeout = rospy.get_param('~wait_timeout', 600.0)
 
     # Wait for both producers (timeout -> fall back to files on disk).
@@ -58,18 +62,23 @@ def main():
     rospy.Subscriber('/pipeline/mb_done', Bool, mb_callback)
     rospy.Subscriber('/pipeline/sss_done', Bool, sss_callback)
 
-    rospy.loginfo("Waiting for BOTH processes to finish (timeout %.0fs)..." % wait_timeout)
+    # OJO: el `wait_timeout > 0` iba DENTRO de la condición de break, así que un
+    # wait_timeout=0 no desactivaba la espera: la hacía infinita. Se comprueba antes.
+    if wait_timeout <= 0:
+        rospy.loginfo("wait_timeout<=0: no se esperan señales, se leen los ficheros de disco.")
+    else:
+        rospy.loginfo("Waiting for BOTH processes to finish (timeout %.0fs)..." % wait_timeout)
 
-    t_start = time.time()
-    while not (mb_finished and sss_finished):
-        if rospy.is_shutdown():
-            rospy.logwarn("Node interrupted while waiting.")
-            return
-        if wait_timeout > 0 and (time.time() - t_start) > wait_timeout:
-            rospy.logwarn("Timeout waiting for upstream signals. "
-                          "Using existing files on disk if available.")
-            break
-        time.sleep(0.5)
+        t_start = time.time()
+        while not (mb_finished and sss_finished):
+            if rospy.is_shutdown():
+                rospy.logwarn("Node interrupted while waiting.")
+                return
+            if (time.time() - t_start) > wait_timeout:
+                rospy.logwarn("Timeout waiting for upstream signals. "
+                              "Using existing files on disk if available.")
+                break
+            time.sleep(0.5)
 
     rospy.loginfo("Proceeding to read files...")
 
@@ -97,40 +106,49 @@ def main():
     try:
         with rasterio.open(sss_tif) as src:
             sss = src.read(1)
-            transform = src.transform
             nodata = src.nodata
 
-            # Sample SSS intensity at each vertex (x, y) UTM
+            # Muestreo VECTORIZADO de la intensidad SSS en cada vértice (x, y) UTM.
+            # src.index() acepta arrays; antes se llamaba una vez por vértice dentro
+            # de un bucle Python de 1.5 M iteraciones.
             rospy.loginfo("Projecting SSS intensity onto the mesh...")
-            intensity = np.zeros(len(vertices), dtype=np.float32)
-
-            for i, (x, y, z) in enumerate(vertices):
-                try:
-                    row, col = src.index(x, y)
-                    if 0 <= row < sss.shape[0] and 0 <= col < sss.shape[1]:
-                        val = sss[row, col]
-                        intensity[i] = NODATA_VALUE if (nodata is not None and val == nodata) else val
-                    else:
-                        intensity[i] = NODATA_VALUE
-                except Exception:
-                    intensity[i] = NODATA_VALUE
+            rows, cols = src.index(vertices[:, 0], vertices[:, 1])
 
     except Exception as e:
         rospy.logerr(f"Failed to open SSS file: {e}")
         return
 
+    rows = np.asarray(rows)
+    cols = np.asarray(cols)
+
+    inside = (rows >= 0) & (rows < sss.shape[0]) & (cols >= 0) & (cols < sss.shape[1])
+
+    intensity = np.full(len(vertices), NODATA_VALUE, dtype=np.float32)
+    intensity[inside] = sss[rows[inside], cols[inside]]
+
+    if nodata is not None:
+        intensity[intensity == nodata] = NODATA_VALUE
+
     # Normalize and apply colormap to vertices
     rospy.loginfo("Normalizing intensity and applying colormap...")
     valid = intensity > NODATA_VALUE
-    rospy.loginfo(f"Vertices with valid intensity: {np.sum(valid)} / {len(valid)}")
+    rospy.loginfo(
+        f"Vertices with valid intensity: {np.sum(valid)} / {len(valid)} "
+        f"({valid.mean() * 100:.1f}% sobre la franja del SSS)"
+    )
 
     if not np.any(valid):
         rospy.logerr("ERROR: No mesh vertices intersect with the SSS mosaic.")
         return
-        
+
+    # Normalizar SOLO con los válidos. Si se normaliza el array entero, los vértices sin
+    # dato (intensity=0, por debajo de imin) dan un valor NEGATIVO que el colormap satura
+    # a negro y quedan indistinguibles de un backscatter bajo real. Se pintan aparte.
     imin, imax = intensity[valid].min(), intensity[valid].max()
-    int_norm = (intensity - imin) / (imax - imin + 1e-6)
-    colors = COLORMAP(int_norm)[:, :3]
+
+    colors = np.tile(np.array(NO_SSS_COLOR), (len(vertices), 1))
+    colors[valid] = COLORMAP((intensity[valid] - imin) / (imax - imin + 1e-6))[:, :3]
+
     mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
 
     # Save result

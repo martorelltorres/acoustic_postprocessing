@@ -24,19 +24,23 @@ from matplotlib import cm
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+from make_media import CMAP_DEPTH
+
 # Config (paths resolved relative to the package root, not the cwd)
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PKG_ROOT, "results", "anim_data")
 OUT_DIR  = os.path.join(PKG_ROOT, "results", "presentation")
-FPS      = 25
+FPS      = 20
 DPI      = 110
 
-# Frame budget per stage (title hold + body)
-ST1 = 45   # area match
-ST2 = 45   # point cloud
-ST3 = 45   # mesh build
-ST4 = 55   # sss projection
-TOTAL = ST1 + ST2 + ST3 + ST4
+# Frame budget per stage (title hold + body). Duración = TOTAL / FPS.
+# Para alargar el clip se AÑADEN fotogramas, no se bajan los fps: la órbita recorre los
+# mismos 120 grados de azimut en todo el clip, así que a 11-12 fps saldría a trompicones.
+ST1 = 70    # area match
+ST2 = 80    # point cloud
+ST3 = 85    # mesh build
+ST4 = 125   # sss projection (es el desenlace: se le da el hold más largo)
+TOTAL = ST1 + ST2 + ST3 + ST4          # 360 frames / 20 fps = 18.0 s
 
 
 def load():
@@ -53,18 +57,27 @@ def setup_axes(ax, V):
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_zlim(zmin, zmax)
-    ax.set_box_aspect((xmax - xmin, ymax - ymin, max(zmax - zmin, 1) * 3))
-    ax.set_xlabel("Easting (m)")
-    ax.set_ylabel("Northing (m)")
+    # zoom: sin él el fondo marino ocupaba un quinto del lienzo.
+    ax.set_box_aspect((xmax - xmin, ymax - ymin, max(zmax - zmin, 1) * 3), zoom=1.28)
+    ax.set_xlabel("Easting (m from survey origin)")
+    ax.set_ylabel("Northing (m from survey origin)")
     ax.set_zlabel("Depth (m)")
 
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     s, f = load()
-    V, T = s["V"], s["T"]
-    inten, cloud = s["inten"], s["cloud"]
-    mb_traj, sss_traj = f["mb_traj"], f["sss_traj"]
+    V, T = s["V"].copy(), s["T"]
+    inten, cloud = s["inten"], s["cloud"].copy()
+    mb_traj, sss_traj = f["mb_traj"].copy(), f["sss_traj"].copy()
+
+    # Todo a metros locales. En UTM (446525, 4377214) matplotlib saca un "+4.465e5"
+    # de offset en el eje que se recorta fuera del lienzo y no se lee.
+    org = np.array([V[:, 0].min(), V[:, 1].min()])
+    V[:, :2] -= org
+    cloud[:, :2] -= org
+    mb_traj -= org
+    sss_traj -= org
 
     z0 = V[:, 2].mean()  # reference depth for the 2D-on-3D footprint stage
 
@@ -73,7 +86,9 @@ def main():
     face_z = tris[:, :, 2].mean(axis=1)
     # Stage-3 colormap: depth shading (terrain)
     zc = (face_z - face_z.min()) / (np.ptp(face_z) + 1e-9)
-    depth_colors = cm.terrain(zc)
+    # Un solo tono (magnitud), no cm.terrain: un arcoíris inventa fronteras que el
+    # dato no tiene. Misma rampa azul que el resto de results/media.
+    depth_colors = CMAP_DEPTH(zc)
     # Stage-4 colormap: SSS intensity per face (gray backscatter)
     face_i = inten[T].mean(axis=1)
     valid = face_i > 0
@@ -83,11 +98,13 @@ def main():
         # Stretch into a visible mid-bright range so backscatter texture pops
         vi = 0.2 + 0.8 * np.clip((face_i - lo) / (hi - lo + 1e-9), 0, 1)
     sss_colors = cm.gray(vi)
-    sss_colors[~valid] = (0.30, 0.18, 0.12, 1.0)  # uncovered faces: dark brown
+    sss_colors[~valid] = (0.16, 0.16, 0.15, 1.0)  # sin cobertura SSS: gris neutro,
+                                                 # igual que en 07_mb_sss_fusion.gif
 
     fig = plt.figure(figsize=(9, 6))
     ax = fig.add_subplot(111, projection="3d")
     fig.patch.set_facecolor("white")
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.90, bottom=0.02)
 
     def title(txt, sub=""):
         ax.set_title(txt + ("\n" + sub if sub else ""), fontsize=12, fontweight="bold")
@@ -131,7 +148,7 @@ def main():
             n = max(100, int(len(cloud) * p))
             sub = cloud[:n]
             ax.scatter(sub[:, 0], sub[:, 1], sub[:, 2],
-                       c=sub[:, 2], cmap="viridis", s=1.0, alpha=0.6)
+                       c=sub[:, 2], cmap=CMAP_DEPTH, s=1.0, alpha=0.6)
 
         # -------- Stage 3: cloud -> mesh --------
         elif frame < ST1 + ST2 + ST3:

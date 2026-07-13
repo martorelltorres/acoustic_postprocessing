@@ -524,6 +524,15 @@ def main():
 
     mesh.compute_vertex_normals()
 
+    # Poisson devuelve un array de colores por vértice TODO A CERO cuando la nube de
+    # entrada no tiene color, y write_triangle_mesh los escribe en el PLY. CloudCompare
+    # respeta el color del vértice, así que pintaba la malla entera de negro. Sin el
+    # array de colores usa su sombreado por normales y se ve el relieve. El color va en
+    # mb_textured_sss.ply, que es el producto texturizado (sss_mb_fusion.py).
+    if mesh.has_vertex_colors() and not np.asarray(mesh.vertex_colors).any():
+        mesh.vertex_colors = o3d.utility.Vector3dVector()
+        rospy.loginfo("Malla sin color: descartado el array de vértices negros de Poisson.")
+
     mesh_file = os.path.join(mesh_dir, "mb_mesh.ply")
     o3d.io.write_triangle_mesh(mesh_file, mesh)
 

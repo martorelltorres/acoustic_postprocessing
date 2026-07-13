@@ -77,16 +77,21 @@ def main():
     rospy.Subscriber('/pipeline/mb_intensity_done', Bool, mb_callback)
     rospy.Subscriber('/pipeline/sss_done', Bool, sss_callback)
 
-    rospy.loginfo("Waiting for MB intensity + SSS mosaics (timeout %.0fs)..." % timeout)
+    # OJO: el `timeout > 0` iba DENTRO de la condición de break, así que un timeout=0
+    # no desactivaba la espera: la hacía infinita. Se comprueba antes del bucle.
+    if timeout <= 0:
+        rospy.loginfo("wait_timeout<=0: no se esperan señales, se leen los .tif de disco.")
+    else:
+        rospy.loginfo("Waiting for MB intensity + SSS mosaics (timeout %.0fs)..." % timeout)
 
-    t0 = time.time()
-    while not (mb_finished and sss_finished):
-        if rospy.is_shutdown():
-            return
-        if timeout > 0 and (time.time() - t0) > timeout:
-            rospy.logwarn("Timeout waiting for signals. Using files on disk if present.")
-            break
-        time.sleep(0.5)
+        t0 = time.time()
+        while not (mb_finished and sss_finished):
+            if rospy.is_shutdown():
+                return
+            if (time.time() - t0) > timeout:
+                rospy.logwarn("Timeout waiting for signals. Using files on disk if present.")
+                break
+            time.sleep(0.5)
 
     if not (os.path.isfile(mb_tif) and os.path.isfile(sss_tif)):
         rospy.logerr("Missing input mosaics, aborting.")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Sidescan -> top-down georeferenced mosaic (UTM GeoTIFF).
-Slant-range corrected, accumulated on a north/east grid.
+Slant-range corrected, AVG-corrected, accumulated on a north/east grid.
 
 Author: Antoni Martorell (SRV, UIB)
 """
@@ -20,7 +20,13 @@ import tf.transformations as tr
 from std_msgs.msg import Bool
 import time
 
-SONAR_RANGE = 30.0   # m, full per-channel range
+# Rango por canal (m). Es SOLO un fallback: el valor real viene en los mensajes
+# SSSConfig del bag (topic .../raw_data/<side>/sss_info, campo `range`) y se lee con
+# get_sonar_range(). El 30.0 hardcodeado que había aquí era FALSO para los bags de
+# Andratx (range real = 50.0 m): colocaba cada muestra al 60% de su rango verdadero,
+# comprimiendo el mosaico x0.6 across-track y arrastrando el error a mb_sss_mosaic.tif
+# y a la textura de mb_textured_sss.ply.
+SONAR_RANGE_FALLBACK = 30.0
 MOSAIC_RES = 0.07    # m/pixel
 BLIND_ZONE = 0.2     # m, nadir gap to skip
 
@@ -133,7 +139,89 @@ def get_nav_data(bag, nav_topic):
     return (f_n, f_e, f_y, f_p, f_r, f_h), (ts[0], ts[-1])
 
 
-def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
+def get_sonar_range(bag, fallback=SONAR_RANGE_FALLBACK):
+    """Rango por canal (m) leído de los SSSConfig del bag; `fallback` si no hay."""
+    cfg_topics = [
+        t for t in bag.get_type_and_topic_info().topics
+        if t.endswith('/sss_info')
+    ]
+
+    for _, msg, _ in bag.read_messages(topics=cfg_topics):
+        if getattr(msg, 'range', 0.0) > 0.0:
+            return float(msg.range)
+
+    rospy.logwarn(f"Sin SSSConfig en el bag; uso SONAR_RANGE={fallback} m (puede ser falso).")
+
+    return float(fallback)
+
+
+def angle_varying_gain(intensity, theta, is_port, bin_deg=2.0, min_samples=200,
+                       max_boost=8.0):
+    """
+    Corrección AVG (Angle Varying Gain) del backscatter del sidescan.
+
+    El eco del SSS está dominado por el ángulo de incidencia sobre el fondo: brillante
+    cerca del nadir, oscuro en rango lejano. Ese patrón es geometría del sonar, no tipo
+    de fondo, y domina el contraste del mosaico y de la malla texturizada.
+
+    Perfil = MEDIA de intensidad por bin angular. OJO: la versión del multihaz usa la
+    MEDIANA, y aquí NO sirve. El eco crudo del SSS está saturado de ceros (47.5% de las
+    muestras son 0 exacto; p75 = 2 sobre 255), así que la mediana por bin vale 0-1 y no
+    mide ganancia sino relleno: el "perfil" sale plano y la corrección es un no-op. La
+    media sí decae suavemente con el ángulo y es lo que hay que dividir.
+
+    El perfil cae ~700x del nadir al rango lejano, donde la señal es casi todo ceros.
+    Dividir por él a pelo amplificaría el ruido de la cola x700, así que la ganancia se
+    acota por abajo a `gmax / max_boost`: más allá de ese punto no hay SNR que rescatar
+    y la cola conserva algo de oscurecimiento residual, a propósito.
+
+    DOS DIFERENCIAS con el multihaz, ambas deliberadas:
+      - Perfil SEPARADO por banda (port/stbd): transductores distintos con ganancias
+        distintas; un perfil único dejaría un escalón justo en el nadir.
+      - Escala COMÚN g0 para las dos bandas. Normalizar cada lado a su propia mediana
+        quitaría el patrón angular pero conservaría el desbalance port/stbd, que
+        también es ganancia y no fondo.
+
+    Devuelve (intensidad_corregida, info) o (None, None) si no hay bins suficientes.
+    """
+    bins = np.arange(0.0, 90.0 + bin_deg, bin_deg)
+    centers = (bins[:-1] + bins[1:]) / 2.0
+    bin_of = np.clip(np.digitize(theta, bins) - 1, 0, len(centers) - 1)
+
+    sides = {"port": is_port, "stbd": ~is_port}
+    gains = {}
+
+    for name, side in sides.items():
+        g = np.full(len(centers), np.nan)
+        for b in range(len(centers)):
+            sel = intensity[side & (bin_of == b)]
+            if sel.size >= min_samples:
+                g[b] = sel.mean()
+        gains[name] = g
+
+    valid = {name: np.isfinite(g) for name, g in gains.items()}
+
+    if min(valid["port"].sum(), valid["stbd"].sum()) < 3:
+        return None, None
+
+    g_max = max(float(gains[name][valid[name]].max()) for name in sides)
+    g_floor = g_max / max_boost
+
+    clamped = {name: np.maximum(gains[name][valid[name]], g_floor) for name in sides}
+
+    g0 = float(np.median(np.concatenate([clamped[name] for name in sides])))
+
+    out = intensity.astype(np.float32).copy()
+
+    for name, side in sides.items():
+        v = valid[name]
+        g_pts = np.interp(theta[side], centers[v], clamped[name])
+        out[side] = intensity[side] / g_pts * g0
+
+    return out, (gains, valid, centers, g0, g_floor)
+
+
+def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=True):
     # Accumulate slant-corrected returns onto the UTM-local grid.
     f_n, f_e, f_y, f_p, f_r, f_h = nav
     t0, t1 = time_range
@@ -146,7 +234,7 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
     valid = ~np.isnan(east_samples) & ~np.isnan(north_samples)
 
-    margin = SONAR_RANGE + 5.0
+    margin = sonar_range + 5.0
 
     x_min = np.min(east_samples[valid]) - margin
     x_max = np.max(east_samples[valid]) + margin
@@ -156,8 +244,13 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
     width = int(np.ceil((x_max - x_min) / MOSAIC_RES))
     height = int(np.ceil((y_max - y_min) / MOSAIC_RES))
 
-    grid = np.zeros(width * height, dtype=np.float32)
-    cnt = np.zeros(width * height, dtype=np.float32)
+    # Se bufferean las muestras (celda, intensidad, ángulo, banda) en vez de acumularlas
+    # al vuelo: el perfil AVG es una mediana GLOBAL por bin angular, así que hay que ver
+    # todos los pings antes de corregir. Son ~6 M muestras (~0.1 GB), una sola pasada.
+    buf_idx = []
+    buf_int = []
+    buf_ang = []
+    buf_port = []
 
     def to_idx(x, y):
         c = ((x - x_min) / MOSAIC_RES).astype(np.int32)
@@ -195,7 +288,9 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
         scan = np.frombuffer(msg.data, dtype=np.uint8).astype(np.float32)
 
         # Port is reversed so the nadir sits at the inner edge
-        if "port" in topic.lower():
+        is_port = "port" in topic.lower()
+
+        if is_port:
             scan = scan[::-1]
             T_sensor = T_PORT
         else:
@@ -203,10 +298,16 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
         # Slant-range -> ground-range
         npx = scan.size
-        meters_px = SONAR_RANGE / npx
+        meters_px = sonar_range / npx
 
         slant = np.arange(npx) * meters_px
         ground = np.sqrt(np.maximum(slant**2 - h**2, 0.0))
+
+        # Ángulo de incidencia sobre el fondo (desde la vertical): 0° en el nadir,
+        # ->90° en rango lejano. Es la variable de la que depende el backscatter y con
+        # la que se bina el AVG. Con `ground` ya corregido de slant-range, sale directo
+        # de la altura sobre el fondo.
+        theta = np.degrees(np.arctan2(ground, h))
 
         valid_mask = ground > BLIND_ZONE
 
@@ -220,7 +321,7 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
         off_e = sensor_offset[0] * np.sin(yaw) + sensor_offset[1] * np.cos(yaw)
 
         # Across-track direction (opposite sign per side)
-        if "port" in topic.lower():
+        if is_port:
             v_ping_n = np.sin(yaw)
             v_ping_e = -np.cos(yaw)
         else:
@@ -234,15 +335,54 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD):
 
         mask = (c >= 0) & (c < width) & (r >= 0) & (r < height)
 
-        idx = r[mask] * width + c[mask]
+        if not np.any(mask):
+            continue
 
-        np.add.at(grid, idx, scan[valid_mask][mask])
-        np.add.at(cnt, idx, 1)
+        buf_idx.append((r[mask].astype(np.int64) * width + c[mask]).astype(np.int64))
+        buf_int.append(scan[valid_mask][mask])
+        buf_ang.append(theta[valid_mask][mask].astype(np.float32))
+        buf_port.append(np.full(int(mask.sum()), is_port, dtype=bool))
 
-    img = np.zeros_like(grid)
+    if not buf_idx:
+        rospy.logerr("No valid sidescan samples")
+        return np.zeros((height, width), dtype=np.float32), x_min, y_max
 
-    valid_pixels = cnt > 0
-    img[valid_pixels] = grid[valid_pixels] / cnt[valid_pixels]
+    idx_all  = np.concatenate(buf_idx)
+    int_all  = np.concatenate(buf_int).astype(np.float32)
+    ang_all  = np.concatenate(buf_ang)
+    port_all = np.concatenate(buf_port)
+
+    rospy.loginfo(f"Muestras SSS: {len(int_all)} "
+                  f"({port_all.sum()} port / {(~port_all).sum()} stbd)")
+
+    if apply_avg:
+        corrected, info = angle_varying_gain(int_all, ang_all, port_all)
+
+        if corrected is None:
+            rospy.logwarn("AVG: pocos bins válidos; mosaico sin corregir.")
+        else:
+            int_all = corrected
+            gains, valid, _, g0, g_floor = info
+
+            for name in ("port", "stbd"):
+                gv = gains[name][valid[name]]
+                rospy.loginfo(
+                    f"AVG {name}: ganancia {gv.min():.2f}-{gv.max():.2f} "
+                    f"(x{gv.max() / max(gv.min(), 1e-3):.0f}) sobre {valid[name].sum()} bins"
+                )
+
+            rospy.loginfo(
+                f"AVG: g0={g0:.2f}, suelo de ganancia {g_floor:.2f} "
+                f"(boost máx x{max(gains[n][valid[n]].max() for n in ('port','stbd')) / g_floor:.0f})"
+            )
+
+    # Media por celda. bincount en vez de np.add.at: mismo resultado, mucho más rápido.
+    grid = np.bincount(idx_all, weights=int_all, minlength=width * height)
+    cnt  = np.bincount(idx_all, minlength=width * height)
+
+    img = np.zeros(width * height, dtype=np.float32)
+    filled = cnt > 0
+    img[filled] = (grid[filled] / cnt[filled]).astype(np.float32)
 
     return img.reshape((height, width)), x_min, y_max
 
@@ -253,6 +393,7 @@ def main():
     bag_file = rospy.get_param('~bag_file', '')
     output_dir = rospy.get_param('~output_dir', '.')
     nav_topic = rospy.get_param('~nav_topic', '/sparus2/navigator/navigation')
+    apply_avg = rospy.get_param('~apply_avg', True)   # corrección AVG por ángulo
 
     if not bag_file:
         rospy.logerr("ERROR: bag_file not provided")
@@ -265,7 +406,8 @@ def main():
         os.makedirs(d, exist_ok=True)
 
     output_tiff = os.path.join(tif_dir, 'sss_mosaic.tif')
-    output_jpg  = os.path.join(images_dir, 'sss_mosaic.jpg')
+    # PNG y no JPG: el fondo sin dato va TRANSPARENTE y JPEG no tiene canal alfa.
+    output_png  = os.path.join(images_dir, 'sss_mosaic.png')
 
     bag = rosbag.Bag(bag_file)
 
@@ -286,12 +428,20 @@ def main():
         'sparus2/sidescan_starboard'
     )
 
+    # Rango por canal: del bag (SSSConfig), no hardcodeado. Ver SONAR_RANGE_FALLBACK.
+    sonar_range = float(rospy.get_param('~sonar_range', 0.0)) or get_sonar_range(bag)
+
+    rospy.loginfo(f"Rango por canal: {sonar_range:.1f} m "
+                  f"({sonar_range / 2000.0 * 1000:.2f} mm/muestra a 2000 muestras)")
+
     img, x_min, y_max = process_mosaic(
         bag,
         nav,
         t_range,
         T_PORT,
-        T_STBD
+        T_STBD,
+        sonar_range,
+        apply_avg=apply_avg
     )
 
     save_geotiff = from_origin(
@@ -330,14 +480,24 @@ def main():
 
     rospy.loginfo(f"GeoTIFF generated: {output_tiff}")
 
-    # JPG del mosaico (visualización) en results/images/. Misma rampa viridis que
-    # mb_intensity.jpg, para poder comparar los dos backscatter a ojo. El fondo sin
-    # dato se fuerza a negro en vez del morado oscuro que le tocaría en viridis.
-    color = cv2.applyColorMap(img8, cv2.COLORMAP_VIRIDIS)
+    # PNG del mosaico (visualización) en results/images/. Misma rampa viridis que
+    # mb_intensity.jpg, para comparar los dos backscatter a ojo. El fondo sin dato va
+    # con alfa=0 (transparente), no pintado: así solo se ve la proyección de los datos
+    # sobre lo que haya debajo. Por eso es PNG y no JPG — JPEG no tiene canal alfa.
+    color = cv2.applyColorMap(img8, cv2.COLORMAP_VIRIDIS)      # BGR
+    # El RGB de debajo del alfa también se pone a 0. Si no, queda el morado de
+    # viridis(0) ahí escondido y cualquier visor que ignore el canal alfa (o cualquier
+    # aplanado sobre fondo) vuelve a pintar el fondo morado.
     color[~filled] = 0
-    cv2.imwrite(output_jpg, color, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    alpha = np.where(filled, 255, 0).astype(np.uint8)
+    bgra = np.dstack([color, alpha])
 
-    rospy.loginfo(f"SSS mosaic JPG saved: {output_jpg}")
+    cv2.imwrite(output_png, bgra)
+
+    rospy.loginfo(
+        f"SSS mosaic PNG saved: {output_png} "
+        f"({filled.mean() * 100:.1f}% de píxeles con dato, resto transparente)"
+    )
 
     pub_sss_done = rospy.Publisher('/pipeline/sss_done', Bool, queue_size=1, latch=True)
 

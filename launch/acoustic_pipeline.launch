@@ -6,7 +6,7 @@
                                     + images/mb_pointcloud.jpg + mesh/mb_mesh.ply
            enable_mb_intensity   -> tif/mb_intensity.tif (paleta viridis)
                                     + images/mb_intensity.jpg + pointcloud/mb_intensity.xyz
-           enable_sss_mosaic     -> tif/sss_mosaic.tif
+           enable_sss_mosaic     -> tif/sss_mosaic.tif + images/sss_mosaic.png (fondo alfa=0)
            enable_sss_waterfall  -> images/sss_waterfall.png
            enable_mosaic_fusion  -> tif/mb_sss_mosaic.tif (needs mb_intensity + sss_mosaic)
            enable_fusion         -> mesh/mb_textured_sss.ply (needs mb_mesh + sss_mosaic) -->
@@ -102,12 +102,36 @@
     <arg name="mb_intensity_res"   default="0.10"/>
     <arg name="mb_intensity_cloud" default="true"/>
     <!-- Corrección AVG (Angle Varying Gain): quita el banding por ángulo de
-         incidencia del backscatter. Sin ella el mosaico salía bimodal (~53% de
-         píxeles casi negros). Portada del SLAM. -->
+         incidencia del backscatter. Portada del SLAM. -->
     <arg name="mb_apply_avg"       default="true"/>
+
+    <!-- Sidescan params -->
+    <!-- AVG del sidescan, portado de multibeam_intensity.py. Sin él, sss_mosaic.tif
+         conserva el patrón brillante-en-nadir / oscuro-en-rango-lejano, que es
+         geometría del sonar y no tipo de fondo: domina el contraste del mosaico y de
+         la malla texturizada mb_textured_sss.ply. sss2mosaic.py ya corregía el
+         slant-range (geometría de posición), pero no la ganancia angular.
+         Perfil SEPARADO por banda (port/stbd, transductores distintos) y escala COMÚN,
+         para quitar de paso el desbalance entre bandas. -->
+    <arg name="sss_apply_avg"      default="true"/>
+    <!-- Rango por canal del sidescan (m). 0 = LEERLO DEL BAG (mensajes SSSConfig del
+         topic .../raw_data/<side>/sss_info, campo `range`). El código tenía un
+         SONAR_RANGE=30.0 hardcodeado que era FALSO para los bags de Andratx (range real
+         = 50.0 m en las 1561 pings de ambas bandas): colocaba cada muestra al 60% de su
+         rango verdadero. Al corregirlo la huella útil pasa de 72.3x71.5 m a 104.9x92.0 m.
+         Solo poner un valor > 0 si el bag no trae SSSConfig. -->
+    <arg name="sss_sonar_range"    default="0.0"/>
 
     <!-- Mosaic fusion mode: max | mean | mb | sss -->
     <arg name="mosaic_fusion_mode" default="max"/>
+
+    <!-- Segundos que los nodos de fusión esperan las señales /pipeline/*_done de sus
+         productores antes de tirar de lo que haya en disco. fusion_node depende de
+         mb_done, que multibeam_processor.py publica DESPUÉS del Poisson (~9 min): con
+         los 600 s de antes iba muy justo, y si se baja voxel_size no llega. 0 desactiva
+         la espera. Ojo: si matas el launch antes de que acabe el Poisson, mb_done no se
+         publica nunca y fusion_node se queda esperando sin generar mb_textured_sss.ply. -->
+    <arg name="fusion_wait_timeout" default="1800.0"/>
 
     <!-- Bags are read directly (not played), so no /clock is published.
          use_sim_time must stay false or time-based waits would block forever. -->
@@ -163,6 +187,8 @@
             <param name="bag_file"   value="$(arg sss_bagfile)"/>
             <param name="output_dir" value="$(arg output_dir)"/>
             <param name="nav_topic"  value="/sparus2/navigator/navigation"/>
+            <param name="apply_avg"    value="$(arg sss_apply_avg)"/>
+            <param name="sonar_range"  value="$(arg sss_sonar_range)"/>
         </node>
     </group>
 
@@ -181,6 +207,7 @@
             <param name="sss_tif"    value="$(arg output_dir)/tif/sss_mosaic.tif"/>
             <param name="output_dir" value="$(arg output_dir)"/>
             <param name="mode"       value="$(arg mosaic_fusion_mode)"/>
+            <param name="wait_timeout" value="$(arg fusion_wait_timeout)"/>
         </node>
     </group>
 
@@ -190,6 +217,7 @@
             <param name="mesh_file"  value="$(arg output_dir)/mesh/mb_mesh.ply"/>
             <param name="sss_tif"    value="$(arg output_dir)/tif/sss_mosaic.tif"/>
             <param name="output_dir" value="$(arg output_dir)"/>
+            <param name="wait_timeout" value="$(arg fusion_wait_timeout)"/>
         </node>
     </group>
 
