@@ -56,6 +56,11 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# INPUTS of this script (the AUV sprite, the stereo photomosaics). They used to live in
+# results/media/, which is regenerable and git-ignored: a `rm -rf results/` deleted them
+# and there was no copy anywhere. Inputs belong outside the output tree.
+ASSETS = os.path.join(PKG_ROOT, "assets")
+
 # ── tokens ─────────────────────────────────────────────────────────────────────
 PAGE   = "#0d0d0d"      # page plane (dark)
 INK    = "#ffffff"      # primary ink
@@ -376,7 +381,7 @@ def gif_reveal(res, out, nav, frames=72, fps=18):
     casing, = ax.plot([], [], color="#0d0d0d", lw=4.0, solid_capstyle="round", zorder=5)
     line, = ax.plot([], [], color=MB_COL, lw=2.2, solid_capstyle="round", zorder=6)
 
-    sprite = load_auv_sprite(os.path.join(out, AUV_PNG))
+    sprite = load_auv_sprite(os.path.join(ASSETS, AUV_PNG))
     imbox = OffsetImage(np.zeros((2, 2, 4)), zoom=AUV_ZOOM, interpolation="bilinear")
     auv = AnnotationBbox(imbox, (x[0], y[0]), frameon=False, pad=0.0, zorder=8,
                          box_alignment=(0.5, 0.5))
@@ -562,7 +567,7 @@ def fig_layer_stack(res, out, nav):
     # It is a plain PNG with no georeferencing, so it cannot go through the survey frame
     # below; it is fitted into the footprint rectangle instead. Missing -> the layer falls
     # back to the empty "next step" frame.
-    mos_png = os.path.join(out, "mosaics", "lawnmower.png")
+    mos_png = os.path.join(ASSETS, "mosaics", "lawnmower.png")
     mos = _load_mosaic(mos_png, rot180=True) if os.path.isfile(mos_png) else None
 
     # ── survey frame: ONE transform for every layer ─────────────────────────────
@@ -741,7 +746,7 @@ def fig_layer_stack(res, out, nav):
     ax.plot(um, vm, color=MB_COL, lw=1.9, transform=tr4, solid_capstyle="round", zorder=z + 3)
 
     try:                                                  # Sparus sprite at the end of the track
-        sprite = load_auv_sprite(os.path.join(out, AUV_PNG))
+        sprite = load_auv_sprite(os.path.join(ASSETS, AUV_PNG))
         win = min(40, len(um) - 1)
         cxe, cye = proj(um[-1], vm[-1], 4)
         p0 = proj(um[-1 - win], vm[-1 - win], 4)
@@ -943,7 +948,7 @@ def fig_octagon_vs_lawnmower(res, out):
     loop closures too — that way the comparison is not won cheaply and the real argument
     stands: the boustrophedon's 90° turns accumulate drift, the octagon's 45° ones do not.
     """
-    mos_dir = os.path.join(out, "mosaics")
+    mos_dir = os.path.join(ASSETS, "mosaics")
     need = [SLAM_TRAJ] + [os.path.join(mos_dir, f) for f in ("lawnmower.png", "octogon.png")]
     missing = [p for p in need if not os.path.isfile(p)]
     if missing:
@@ -1148,7 +1153,7 @@ def main():
 
     cache = os.path.join(out, ".nav_cache.npz")
     if not os.path.isfile(cache):
-        print(f"[media] {cache} missing: generate it from the bag trajectories.")
+        print(f"[media] {cache} missing: run `python3 make_nav_cache.py` first.")
         return 1
 
     nav = dict(np.load(cache))

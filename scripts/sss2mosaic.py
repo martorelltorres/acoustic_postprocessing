@@ -11,21 +11,23 @@ import rosbag
 import numpy as np
 import cv2
 import os
-from scipy.interpolate import interp1d
-from scipy.ndimage import gaussian_filter1d
+import sys
 import rasterio
 from rasterio.transform import from_origin
 from pyproj import Transformer
-import tf.transformations as tr
 from std_msgs.msg import Bool
 import time
 
-# Per-channel range (m). ONLY a fallback: the real value comes from the bag's SSSConfig
-# messages (topic .../raw_data/<side>/sss_info, field `range`) and is read by
-# get_sonar_range(). The 30.0 that used to be hardcoded here was WRONG for the Andratx
-# bags (real range 50.0 m): it placed every sample at 60% of its true range, squeezing
-# the mosaic x0.6 across-track and propagating the error downstream.
-SONAR_RANGE_FALLBACK = 30.0
+# Shared helpers live in scripts/common.py, imported with a flat name. Under catkin the
+# script runs through a devel/lib wrapper whose sys.path does NOT include this directory
+# (the wrapper does point __file__ at this source file), so add it explicitly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from common import (get_static_transform_from_tf, get_nav_origin, read_nav,
+                    nav_interpolators, get_sonar_range, enhance_data,
+                    find_sidescan_topics, is_port_topic, slant_to_ground,
+                    SONAR_RANGE_FALLBACK)
+
 MOSAIC_RES = 0.07    # m/pixel
 BLIND_ZONE = 0.2     # m, nadir gap to skip
 
@@ -34,124 +36,16 @@ CRS_UTM = "EPSG:32631"
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
 
 
-def enhance_data(img_input):
-    # Normalize (2-98 pct), despeckle, CLAHE, sharpen -> 8-bit.
-
-    if img_input is None or img_input.size == 0:
-        return np.zeros_like(img_input, dtype=np.uint8)
-
-    valid = img_input > 0
-    if not np.any(valid):
-        return np.zeros_like(img_input, dtype=np.uint8)
-
-    vmin, vmax = np.percentile(img_input[valid], (2, 98))
-    vmax = max(vmax, vmin + 1e-6)
-
-    img = np.clip((img_input - vmin) * 255.0 / (vmax - vmin), 0, 255).astype(np.uint8)
-    img = cv2.medianBlur(img, 5)
-
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    img = clahe.apply(img)
-
-    kernel = np.array([
-        [0, -1, 0],
-        [-1, 5, -1],
-        [0, -1, 0]
-    ])
-
-    return cv2.filter2D(img, -1, kernel)
-
-
-def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
-    # First parent->child transform found in /tf_static or /tf (4x4).
-
-    bag = rosbag.Bag(bag_file)
-
-    for _, msg, _ in bag.read_messages(topics=['/tf_static', '/tf']):
-        for transform in msg.transforms:
-
-            if transform.header.frame_id == parent_frame and transform.child_frame_id == child_frame:
-
-                q = transform.transform.rotation
-                t = transform.transform.translation
-
-                T = tr.quaternion_matrix([q.x, q.y, q.z, q.w])
-                T[:3, 3] = [t.x, t.y, t.z]
-
-                bag.close()
-                return T
-
-    bag.close()
-    return np.identity(4)
-
-
-def get_nav_origin(bag, nav_topic):
-    # Geographic origin (lat, lon) of the local navigation frame.
-    for _, msg, _ in bag.read_messages(topics=[nav_topic]):
-        if hasattr(msg, 'origin'):
-            return msg.origin.latitude, msg.origin.longitude
-
-    raise RuntimeError("Navigation geographic origin not found")
-
-
 def get_nav_data(bag, nav_topic):
-    # Time interpolators for pose + altitude (yaw smoothed).
+    # Time interpolators for pose + altitude (yaw SMOOTHED: sidescan only, see below).
+    nav = read_nav(bag, nav_topic)
 
-    ts, north, east, yaw, pitch, roll, alt = [], [], [], [], [], [], []
+    # sigma=2 gaussian on yaw. Deliberately NOT done in the multibeam scripts: here the
+    # across-track direction is derived straight from yaw, so INS jitter smears the
+    # samples sideways; the multibeam gates on yaw rate instead.
+    f = nav_interpolators(nav, smooth_yaw_sigma=2)
 
-    for _, msg, _ in bag.read_messages(topics=[nav_topic]):
-
-        ts.append(msg.header.stamp.to_sec())
-        north.append(msg.position.north)
-        east.append(msg.position.east)
-
-        yaw.append(msg.orientation.yaw)
-        pitch.append(msg.orientation.pitch)
-        roll.append(msg.orientation.roll)
-
-        alt.append(msg.altitude)
-
-    ts = np.array(ts)
-    idx = np.argsort(ts)
-
-    ts = ts[idx]
-    north = np.array(north)[idx]
-    east = np.array(east)[idx]
-
-    yaw = np.unwrap(np.array(yaw)[idx])
-    yaw = gaussian_filter1d(yaw, sigma=2)
-
-    pitch = np.unwrap(np.array(pitch)[idx])
-    roll = np.unwrap(np.array(roll)[idx])
-
-    alt = np.array(alt)[idx]
-
-    f_n = interp1d(ts, north, bounds_error=False, fill_value=np.nan)
-    f_e = interp1d(ts, east, bounds_error=False, fill_value=np.nan)
-
-    f_y = interp1d(ts, yaw, bounds_error=False, fill_value=np.nan)
-    f_p = interp1d(ts, pitch, bounds_error=False, fill_value=np.nan)
-    f_r = interp1d(ts, roll, bounds_error=False, fill_value=np.nan)
-
-    f_h = interp1d(ts, alt, bounds_error=False, fill_value=np.nan)
-
-    return (f_n, f_e, f_y, f_p, f_r, f_h), (ts[0], ts[-1])
-
-
-def get_sonar_range(bag, fallback=SONAR_RANGE_FALLBACK):
-    """Per-channel range (m) read from the bag's SSSConfig; `fallback` if absent."""
-    cfg_topics = [
-        t for t in bag.get_type_and_topic_info().topics
-        if t.endswith('/sss_info')
-    ]
-
-    for _, msg, _ in bag.read_messages(topics=cfg_topics):
-        if getattr(msg, 'range', 0.0) > 0.0:
-            return float(msg.range)
-
-    rospy.logwarn(f"No SSSConfig in the bag; using SONAR_RANGE={fallback} m (may be wrong).")
-
-    return float(fallback)
+    return (f['n'], f['e'], f['y'], f['p'], f['r'], f['h']), (nav['ts'][0], nav['ts'][-1])
 
 
 def angle_varying_gain(intensity, theta, is_port, bin_deg=2.0, min_samples=200,
@@ -256,12 +150,7 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=
         r = ((y_max - y) / MOSAIC_RES).astype(np.int32)
         return c, r
 
-    info = bag.get_type_and_topic_info()
-
-    sss_topics = [
-        t for t, v in info.topics.items()
-        if "sidescan" in t.lower() and "Image" in v.msg_type
-    ]
+    sss_topics = find_sidescan_topics(bag)
 
     for topic, msg, _ in bag.read_messages(topics=sss_topics):
 
@@ -286,8 +175,10 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=
 
         scan = np.frombuffer(msg.data, dtype=np.uint8).astype(np.float32)
 
-        # Port is reversed so the nadir sits at the inner edge
-        is_port = "port" in topic.lower()
+        # The raw port ping runs FAR -> NADIR (mirrored w.r.t. starboard; verified on the
+        # bag, see common.is_port_topic). Reverse it so sample 0 is the nadir for both
+        # channels, which is what slant_to_ground assumes.
+        is_port = is_port_topic(topic)
 
         if is_port:
             scan = scan[::-1]
@@ -295,16 +186,8 @@ def process_mosaic(bag, nav, time_range, T_PORT, T_STBD, sonar_range, apply_avg=
         else:
             T_sensor = T_STBD
 
-        # Slant-range -> ground-range
-        npx = scan.size
-        meters_px = sonar_range / npx
-
-        slant = np.arange(npx) * meters_px
-        ground = np.sqrt(np.maximum(slant**2 - h**2, 0.0))
-
-        # Incidence angle on the bottom, from vertical: 0° at nadir, ->90° at far range.
-        # This is the variable backscatter depends on and the one AVG bins by.
-        theta = np.degrees(np.arctan2(ground, h))
+        # Slant-range -> ground-range, plus the incidence angle the AVG bins by.
+        ground, theta = slant_to_ground(scan.size, sonar_range, h)
 
         valid_mask = ground > BLIND_ZONE
 
@@ -426,7 +309,8 @@ def main():
     )
 
     # Per-channel range: read from the bag (SSSConfig), not hardcoded. See SONAR_RANGE_FALLBACK.
-    sonar_range = float(rospy.get_param('~sonar_range', 0.0)) or get_sonar_range(bag)
+    sonar_range = float(rospy.get_param('~sonar_range', 0.0)) or get_sonar_range(
+        bag, logger=rospy.logwarn)
 
     rospy.loginfo(f"Per-channel range: {sonar_range:.1f} m "
                   f"({sonar_range / 2000.0 * 1000:.2f} mm/sample at 2000 samples)")
@@ -448,13 +332,14 @@ def main():
         MOSAIC_RES
     )
 
-    img8 = enhance_data(img)
+    # nodata_mask: the empty cells are 0 and must not enter the 2-98 pct stretch.
+    filled = img > 0
+    img8 = enhance_data(img, nodata_mask=~filled)
 
     # enhance_data's CLAHE lifts the empty background above 0, so 0 would stop meaning
     # "no data" and would pollute the histogram and the JPG. 0 is reserved for nodata:
     # background to 0, filled cells to >=1, which is what mb_sss_mosaic_fusion.py expects
     # from `sss_g > 0`.
-    filled = img > 0
     img8[filled] = np.maximum(img8[filled], 1)
     img8[~filled] = 0
 

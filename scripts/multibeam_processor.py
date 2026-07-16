@@ -13,52 +13,27 @@ import numpy as np
 import ros_numpy
 import open3d as o3d
 import os
+import sys
 import cv2
 import rasterio
 from rasterio.transform import from_origin
 import tf.transformations as tr
 
-from scipy.interpolate import interp1d
 from pyproj import Transformer
 from std_msgs.msg import Bool
 import time
+
+# Shared helpers live in scripts/common.py, imported with a flat name. Under catkin the
+# script runs through a devel/lib wrapper whose sys.path does NOT include this directory
+# (the wrapper does point __file__ at this source file), so add it explicitly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from common import get_static_transforms, get_nav_origin, read_nav, nav_interpolators
 
 # Geographic -> UTM (zone 31N)
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM   = "EPSG:32631"
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
-
-
-def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
-    # First parent->child transform found in /tf_static or /tf (4x4).
-
-    bag = rosbag.Bag(bag_file)
-
-    for _, msg, _ in bag.read_messages(topics=['/tf_static', '/tf']):
-        for transform in msg.transforms:
-
-            if transform.header.frame_id == parent_frame and transform.child_frame_id == child_frame:
-
-                q = transform.transform.rotation
-                t = transform.transform.translation
-
-                T = tr.quaternion_matrix([q.x, q.y, q.z, q.w])
-                T[:3, 3] = [t.x, t.y, t.z]
-
-                bag.close()
-                return T
-
-    bag.close()
-    return np.identity(4)
-
-
-def get_nav_origin(bag, nav_topic):
-    # Geographic origin (lat, lon) of the local navigation frame.
-    for _, msg, _ in bag.read_messages(topics=[nav_topic]):
-        if hasattr(msg, 'origin'):
-            return msg.origin.latitude, msg.origin.longitude
-
-    raise RuntimeError("Navigation origin not found")
 
 
 def _cell_median(pts, cell):
@@ -128,7 +103,9 @@ def main():
     voxel_size = rospy.get_param('~voxel_size', 0.05)
     sor_k      = rospy.get_param('~sor_k', 50)
     sor_std    = rospy.get_param('~sor_std', 1.0)
-    angle_cutoff_deg = rospy.get_param('~angle_cutoff', 60.0)
+    # 55.0 to match the launch's <arg>: running the script standalone used to apply a
+    # different cutoff (60) than the pipeline.
+    angle_cutoff_deg = rospy.get_param('~angle_cutoff', 55.0)
     poisson_depth = int(rospy.get_param('~poisson_depth', 10))
     mosaic_res    = float(rospy.get_param('~dem_res', 0.10))   # DEM/TIF cell size
     # Surface-relative outlier filter (removes spurious vertical spikes).
@@ -167,24 +144,18 @@ def main():
 
     rospy.loginfo(f"UTM origin: {X0_UTM:.3f}, {Y0_UTM:.3f}")
 
-    # Sensor TFs (multibeam + sidescan, for the lever-arm)
-    T_MB = get_static_transform_from_tf(
-        bag_file,
-        'sparus2/base_link',
-        'sparus2/multibeam'
-    )
+    # Sensor TFs (multibeam + sidescan, for the lever-arm), all three in ONE pass over
+    # the bag: resolving them one by one re-scanned /tf_static + /tf from the start each
+    # time, so the bag was opened four times over.
+    TFS = get_static_transforms(bag_file, [
+        ('sparus2/base_link', 'sparus2/multibeam'),
+        ('sparus2/base_link', 'sparus2/sidescan_port'),
+        ('sparus2/base_link', 'sparus2/sidescan_starboard'),
+    ])
 
-    T_PORT = get_static_transform_from_tf(
-        bag_file,
-        'sparus2/base_link',
-        'sparus2/sidescan_port'
-    )
-
-    T_STBD = get_static_transform_from_tf(
-        bag_file,
-        'sparus2/base_link',
-        'sparus2/sidescan_starboard'
-    )
+    T_MB   = TFS[('sparus2/base_link', 'sparus2/multibeam')]
+    T_PORT = TFS[('sparus2/base_link', 'sparus2/sidescan_port')]
+    T_STBD = TFS[('sparus2/base_link', 'sparus2/sidescan_starboard')]
 
     R_sensor = T_MB[:3, :3]
     sensor_offset = T_MB[:3, 3]
@@ -202,52 +173,23 @@ def main():
     rospy.loginfo(f"SSS center     : {sss_center}")
     rospy.loginfo(f"Lever-arm delta: {delta_sensor}")
 
-    # Navigation: build time interpolators for pose
-    ts_nav = []
-    north = []
-    east = []
-    depth = []
-    yaw = []
-    pitch = []
-    roll = []
+    # Navigation: read (sorted + deduplicated by timestamp) and build the interpolators.
+    # No yaw smoothing here: that is a sidescan-only treatment (see common.py).
+    nav = read_nav(bag, nav_topic)
+    ts_nav = nav['ts']
 
-    for _, msg, _ in bag.read_messages(topics=[nav_topic]):
-
-        ts_nav.append(msg.header.stamp.to_sec())
-
-        north.append(msg.position.north)
-        east.append(msg.position.east)
-        depth.append(msg.position.depth)
-
-        yaw.append(msg.orientation.yaw)
-        pitch.append(msg.orientation.pitch)
-        roll.append(msg.orientation.roll)
-
-    ts_nav = np.array(ts_nav)
-    yaw_unwrapped = np.unwrap(np.array(yaw))
-
-    f_n = interp1d(ts_nav, np.array(north), bounds_error=False, fill_value=np.nan)
-    f_e = interp1d(ts_nav, np.array(east), bounds_error=False, fill_value=np.nan)
-    f_d = interp1d(ts_nav, np.array(depth), bounds_error=False, fill_value=np.nan)
-
-    f_y = interp1d(ts_nav, yaw_unwrapped, bounds_error=False, fill_value=np.nan)
-    f_p = interp1d(ts_nav, np.unwrap(np.array(pitch)), bounds_error=False, fill_value=np.nan)
-    f_r = interp1d(ts_nav, np.unwrap(np.array(roll)), bounds_error=False, fill_value=np.nan)
-
-    # Yaw rate: the direct signature of a turn. High roll comes with banking into and
-    # out of it, but the swath also smears when the vehicle rotates fast in heading,
-    # even flying level.
-    yaw_rate_dps = np.degrees(
-        np.gradient(yaw_unwrapped) / np.maximum(np.gradient(ts_nav), 1e-3)
-    )
-    f_yr = interp1d(ts_nav, yaw_rate_dps, bounds_error=False, fill_value=np.nan)
+    f = nav_interpolators(nav, with_yaw_rate=True)
+    f_n, f_e, f_d = f['n'], f['e'], f['d']
+    f_y, f_p, f_r = f['y'], f['p'], f['r']
+    f_yr = f['yr']
 
     # Roll bias (mounting trim): median roll is ~+2° in these bags, not 0. The gate
     # measures the EXCURSION about that bias, not absolute roll — a constant 2° roll is
     # modelled fine by the rotation matrix, while thresholding raw |roll| cuts
     # asymmetrically (r=+0.46 with raw |roll| vs r=+0.54 with |roll - bias|).
+    # Computed on RAW roll (not unwrapped), as the gate compares against raw roll too.
     if not np.isfinite(roll_bias_deg):
-        roll_bias_deg = float(np.degrees(np.median(np.array(roll))))
+        roll_bias_deg = float(np.degrees(np.median(nav['roll'])))
 
     rospy.loginfo(
         f"Attitude: roll bias {roll_bias_deg:+.2f}° | gate |roll-bias|<={max_roll_deg}° "
@@ -284,6 +226,12 @@ def main():
         yaw_t = float(f_y(ts))
         pitch_t = float(f_p(ts))
         roll_t = float(f_r(ts))
+
+        # A gap in the INS inside the nav time span interpolates to NaN, which would
+        # otherwise propagate silently into the cloud (the time-range check above only
+        # catches pings OUTSIDE the span). Same guard as multibeam_intensity.py.
+        if np.isnan(n) or np.isnan(e) or np.isnan(yaw_t):
+            continue
 
         # Attitude gate: in a turn the swath projects as a tilted fan that does not match
         # the neighbouring passes, and there is no post-hoc fix without registering swaths

@@ -1,4 +1,14 @@
 results/
 docs/
 background/
+assets/
 scripts/__pycache__/
+
+# INPUT assets for make_media.py. assets/ itself IS tracked (it holds sparusII.png, the
+# 48 KB AUV sprite): the whole point of assets/ is that these are inputs, not products,
+# so a `rm -rf results/` must not take them with it.
+# The stereo photomosaics are the exception — 178 MB of PNG has no business in git. They
+# stay out of the repo but out of results/ too, so they survive a results/ wipe. Both
+# consumers already degrade gracefully without them (fig_layer_stack falls back to an
+# empty frame, fig_octagon_vs_lawnmower skips with a message).
+assets/mosaics/

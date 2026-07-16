@@ -9,8 +9,8 @@ Pipeline story animation (matplotlib 3D), 4 stages with real mission data:
   3. MESH        : the cloud is reconstructed into a surface mesh.
   4. SSS TEXTURE : the SSS intensity (other bag) is projected onto the MB mesh.
 
-Inputs  : results/anim_data/{stages.npz, footprints.npz}
-Outputs : results/presentation/anim_pipeline.{mp4,gif}
+Inputs  : results/media/{stages.npz, footprints.npz}   (from make_anim_data.py)
+Outputs : results/media/anim_pipeline.{mp4,gif}
 
 Author: Antoni Martorell (SRV, UIB)
 """
@@ -26,10 +26,13 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from make_media import CMAP_DEPTH
 
-# Config (paths resolved relative to the package root, not the cwd)
+# Config (paths resolved relative to the package root, not the cwd).
+# Everything media-related lives in results/media/ — which is what results/README.md
+# documents and where the files on disk actually are. The anim_data/ + presentation/
+# split was left over from an older layout and matched nothing.
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(PKG_ROOT, "results", "anim_data")
-OUT_DIR  = os.path.join(PKG_ROOT, "results", "presentation")
+DATA_DIR = os.path.join(PKG_ROOT, "results", "media")
+OUT_DIR  = DATA_DIR
 FPS      = 20
 DPI      = 110
 

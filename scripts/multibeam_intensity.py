@@ -17,47 +17,28 @@ import rosbag
 import numpy as np
 import ros_numpy
 import os
+import sys
 import time
 
 import cv2
 import rasterio
 from rasterio.transform import from_origin
-from scipy.interpolate import interp1d
 from pyproj import Transformer
 import tf.transformations as tr
 from std_msgs.msg import Bool
+
+# Shared helpers live in scripts/common.py, imported with a flat name. Under catkin the
+# script runs through a devel/lib wrapper whose sys.path does NOT include this directory
+# (the wrapper does point __file__ at this source file), so add it explicitly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from common import (get_static_transforms, get_nav_origin, read_nav, nav_interpolators,
+                    enhance_data)
 
 # Geographic -> UTM (zone 31N)
 CRS_WGS84 = "EPSG:4326"
 CRS_UTM   = "EPSG:32631"
 ll_to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
-
-
-def enhance_data(img_input):
-    # Normalize (2-98 pct), despeckle, CLAHE, sharpen -> 8-bit.
-    if img_input is None or img_input.size == 0:
-        return np.zeros_like(img_input, dtype=np.uint8)
-
-    valid = img_input > 0
-    if not np.any(valid):
-        return np.zeros_like(img_input, dtype=np.uint8)
-
-    vmin, vmax = np.percentile(img_input[valid], (2, 98))
-    vmax = max(vmax, vmin + 1e-6)
-
-    img = np.clip((img_input - vmin) * 255.0 / (vmax - vmin), 0, 255).astype(np.uint8)
-    img = cv2.medianBlur(img, 5)
-
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    img = clahe.apply(img)
-
-    kernel = np.array([
-        [0, -1, 0],
-        [-1, 5, -1],
-        [0, -1, 0]
-    ])
-
-    return cv2.filter2D(img, -1, kernel)
 
 
 def viridis_colormap():
@@ -76,38 +57,6 @@ def viridis_colormap():
     return cmap
 
 
-def get_static_transform_from_tf(bag_file, parent_frame, child_frame):
-    # First parent->child transform found in /tf_static or /tf (4x4).
-
-    bag = rosbag.Bag(bag_file)
-
-    for _, msg, _ in bag.read_messages(topics=['/tf_static', '/tf']):
-        for transform in msg.transforms:
-
-            if transform.header.frame_id == parent_frame and transform.child_frame_id == child_frame:
-
-                q = transform.transform.rotation
-                t = transform.transform.translation
-
-                T = tr.quaternion_matrix([q.x, q.y, q.z, q.w])
-                T[:3, 3] = [t.x, t.y, t.z]
-
-                bag.close()
-                return T
-
-    bag.close()
-    return np.identity(4)
-
-
-def get_nav_origin(bag, nav_topic):
-    # Geographic origin (lat, lon) of the local navigation frame.
-    for _, msg, _ in bag.read_messages(topics=[nav_topic]):
-        if hasattr(msg, 'origin'):
-            return msg.origin.latitude, msg.origin.longitude
-
-    raise RuntimeError("Navigation origin not found")
-
-
 def main():
 
     rospy.init_node('multibeam_intensity')
@@ -120,7 +69,9 @@ def main():
     output_dir = rospy.get_param('~output_dir')
 
     mosaic_res       = rospy.get_param('~mosaic_res', 0.10)
-    angle_cutoff_deg = rospy.get_param('~angle_cutoff', 60.0)
+    # 55.0 to match the launch's <arg>: running the script standalone used to apply a
+    # different cutoff (60) than the pipeline.
+    angle_cutoff_deg = rospy.get_param('~angle_cutoff', 55.0)
     save_cloud       = rospy.get_param('~save_cloud', True)
     apply_avg        = rospy.get_param('~apply_avg', True)   # angle-varying gain correction
     # ATTITUDE gating: identical to multibeam_processor.py (same launch args); see the
@@ -151,15 +102,16 @@ def main():
 
     rospy.loginfo(f"UTM origin: {X0_UTM:.3f}, {Y0_UTM:.3f}")
 
-    # TF chain (same as multibeam_processor.py)
-    T_MB = get_static_transform_from_tf(
-        bag_file, 'sparus2/base_link', 'sparus2/multibeam')
+    # TF chain (same as multibeam_processor.py), all three in ONE pass over the bag.
+    TFS = get_static_transforms(bag_file, [
+        ('sparus2/base_link', 'sparus2/multibeam'),
+        ('sparus2/base_link', 'sparus2/sidescan_port'),
+        ('sparus2/base_link', 'sparus2/sidescan_starboard'),
+    ])
 
-    T_PORT = get_static_transform_from_tf(
-        bag_file, 'sparus2/base_link', 'sparus2/sidescan_port')
-
-    T_STBD = get_static_transform_from_tf(
-        bag_file, 'sparus2/base_link', 'sparus2/sidescan_starboard')
+    T_MB   = TFS[('sparus2/base_link', 'sparus2/multibeam')]
+    T_PORT = TFS[('sparus2/base_link', 'sparus2/sidescan_port')]
+    T_STBD = TFS[('sparus2/base_link', 'sparus2/sidescan_starboard')]
 
     R_sensor = T_MB[:3, :3]
     sensor_offset = T_MB[:3, 3]
@@ -172,37 +124,19 @@ def main():
 
     rospy.loginfo(f"Lever-arm delta: {delta_sensor}")
 
-    # Navigation: build time interpolators for pose
-    ts_nav, north, east, depth, yaw, pitch, roll = [], [], [], [], [], [], []
+    # Navigation: read (sorted + deduplicated by timestamp) and build the interpolators.
+    # Identical treatment to multibeam_processor.py — no yaw smoothing, with yaw rate.
+    nav = read_nav(bag, nav_topic)
+    ts_nav = nav['ts']
 
-    for _, msg, _ in bag.read_messages(topics=[nav_topic]):
-        ts_nav.append(msg.header.stamp.to_sec())
-        north.append(msg.position.north)
-        east.append(msg.position.east)
-        depth.append(msg.position.depth)
-        yaw.append(msg.orientation.yaw)
-        pitch.append(msg.orientation.pitch)
-        roll.append(msg.orientation.roll)
+    f = nav_interpolators(nav, with_yaw_rate=True)
+    f_n, f_e, f_d = f['n'], f['e'], f['d']
+    f_y, f_p, f_r = f['y'], f['p'], f['r']
+    f_yr = f['yr']
 
-    ts_nav = np.array(ts_nav)
-    yaw_unwrapped = np.unwrap(np.array(yaw))
-
-    f_n = interp1d(ts_nav, np.array(north), bounds_error=False, fill_value=np.nan)
-    f_e = interp1d(ts_nav, np.array(east),  bounds_error=False, fill_value=np.nan)
-    f_d = interp1d(ts_nav, np.array(depth), bounds_error=False, fill_value=np.nan)
-
-    f_y = interp1d(ts_nav, yaw_unwrapped,              bounds_error=False, fill_value=np.nan)
-    f_p = interp1d(ts_nav, np.unwrap(np.array(pitch)), bounds_error=False, fill_value=np.nan)
-    f_r = interp1d(ts_nav, np.unwrap(np.array(roll)),  bounds_error=False, fill_value=np.nan)
-
-    # Yaw-rate and roll bias for the attitude gate (see multibeam_processor.py).
-    yaw_rate_dps = np.degrees(
-        np.gradient(yaw_unwrapped) / np.maximum(np.gradient(ts_nav), 1e-3)
-    )
-    f_yr = interp1d(ts_nav, yaw_rate_dps, bounds_error=False, fill_value=np.nan)
-
+    # Roll bias for the attitude gate, on RAW roll (see multibeam_processor.py).
     if not np.isfinite(roll_bias_deg):
-        roll_bias_deg = float(np.degrees(np.median(np.array(roll))))
+        roll_bias_deg = float(np.degrees(np.median(nav['roll'])))
 
     rospy.loginfo(
         f"Attitude: roll bias {roll_bias_deg:+.2f}° | gate |roll-bias|<={max_roll_deg}° "
@@ -403,14 +337,17 @@ def main():
         img[u] = np.median(vals_s[s:s + cnt_u])
     img = img.reshape((height, width)).astype(np.float32)
 
-    img8 = enhance_data(img)
+    # nodata_mask: empty cells are 0 here, and the 2-98 pct stretch must ignore them or
+    # it would spend the ramp on background. (The waterfall passes no mask on purpose —
+    # there 0 is a real echo sample. See common.enhance_data.)
+    filled = img > 0
+    img8 = enhance_data(img, nodata_mask=~filled)
 
     # enhance_data's CLAHE lifts the empty background from 0 to ~4, so 0 would stop
     # meaning "no data" (the .tif histogram came out with median 4 and mean 60 — the fake
     # "almost-black bimodal mosaic", where the median was measuring the BACKGROUND, not
     # the seafloor). 0 is reserved for nodata: empty cells go back to 0 and filled ones
     # are forced to >=1, which is what mb_sss_mosaic_fusion.py expects from `mb_g > 0`.
-    filled = img > 0
     img8[filled] = np.maximum(img8[filled], 1)
     img8[~filled] = 0
 

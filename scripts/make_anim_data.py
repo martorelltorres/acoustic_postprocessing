@@ -3,10 +3,11 @@
 Builds the inputs of make_pipeline_animation.py from results/.
 
 Outputs:
-  results/anim_data/stages.npz      V, T, inten, cloud
-  results/anim_data/footprints.npz  mb_traj, sss_traj
+  results/media/stages.npz      V, T, inten, cloud
+  results/media/footprints.npz  mb_traj, sss_traj
 
-Usage:  python3 make_anim_data.py [results_dir]
+Usage:  python3 make_nav_cache.py        # once: writes results/media/.nav_cache.npz
+        python3 make_anim_data.py [results_dir]
 
 TWO CONSTRAINTS IMPOSED BY THE CONSUMER (make_pipeline_animation.py):
 
@@ -112,8 +113,8 @@ def load_nav(res):
     cache = os.path.join(res, "media", ".nav_cache.npz")
     if not os.path.isfile(cache):
         raise SystemExit(
-            f"{cache} is missing. It is produced by the navigation extraction in "
-            "make_media.py; without it there are no trajectories for stage 1.")
+            f"{cache} is missing. Generate it with `python3 make_nav_cache.py`; "
+            "without it there are no trajectories for stage 1.")
 
     d = np.load(cache)
     return d
@@ -126,7 +127,9 @@ def decimate(a, n):
 
 def main():
     res = sys.argv[1] if len(sys.argv) > 1 else os.path.join(PKG_ROOT, "results")
-    out = os.path.join(res, "anim_data")
+    # results/media/, like every other media product (see results/README.md). The old
+    # anim_data/ directory matched neither the README nor the files on disk.
+    out = os.path.join(res, "media")
     os.makedirs(out, exist_ok=True)
 
     dem_tif = os.path.join(res, "tif", "mb_pointcloud.tif")

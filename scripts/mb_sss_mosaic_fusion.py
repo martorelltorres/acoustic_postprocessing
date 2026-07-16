@@ -10,12 +10,20 @@ Author: Antoni Martorell (SRV, UIB)
 
 import rospy
 import os
+import sys
 import time
 import numpy as np
 import rasterio
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_origin
 from std_msgs.msg import Bool
+
+# Shared helpers live in scripts/common.py, imported with a flat name. Under catkin the
+# script runs through a devel/lib wrapper whose sys.path does NOT include this directory
+# (the wrapper does point __file__ at this source file), so add it explicitly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from common import load_raster
 
 # Pipeline completion flags
 mb_finished = False
@@ -34,12 +42,6 @@ def sss_callback(msg):
     if msg.data:
         sss_finished = True
         rospy.loginfo("Sidescan signal received.")
-
-
-def load_raster(path):
-    # Read band 1 plus its geo-referencing.
-    with rasterio.open(path) as src:
-        return src.read(1).astype(np.float32), src.transform, src.crs, src.res
 
 
 def resample_to(data, src_transform, src_crs, dst_transform, dst_crs, shape):
@@ -98,13 +100,19 @@ def main():
         return
 
     mb, mb_T, mb_crs, mb_res = load_raster(mb_tif)
-    sss, sss_T, sss_crs, _   = load_raster(sss_tif)
+    sss, sss_T, sss_crs, sss_res = load_raster(sss_tif)
 
     if str(mb_crs) != str(sss_crs):
         rospy.logwarn(f"CRS mismatch ({mb_crs} vs {sss_crs}); assuming compatible.")
 
-    # Common grid: union of both extents at the finest resolution.
-    res = min(mb_res[0], mb_res[1])
+    # Common grid: union of both extents at the finest resolution — of BOTH rasters.
+    # This used to be min(mb_res[0], mb_res[1]): the min over the MB's own x/y, with the
+    # sidescan's resolution read and then dropped. In practice MB = 0.10 m and SSS =
+    # 0.07 m, so the fusion resampled the sidescan DOWN to 0.10 m, throwing away ~30% of
+    # the linear resolution of the finer of the two sensors.
+    res = min(mb_res[0], mb_res[1], sss_res[0], sss_res[1])
+    rospy.loginfo(
+        f"Common grid at {res:.3f} m/px (MB {mb_res[0]:.3f}, SSS {sss_res[0]:.3f})")
 
     def bounds(T, shape):
         # (left, bottom, right, top) from an affine transform + raster shape.
@@ -149,7 +157,10 @@ def main():
     with rasterio.open(
         out_tif, 'w', driver='GTiff',
         height=height, width=width, count=1, dtype=np.uint8,
-        crs=mb_crs, transform=dst_T, compress='deflate'
+        crs=mb_crs, transform=dst_T, compress='deflate',
+        # 0 = nodata, same convention as both inputs (which declare it and whose blend
+        # already keys off `> 0`). It used to be left unset here.
+        nodata=0
     ) as dst:
         dst.write(fused8, 1)
 

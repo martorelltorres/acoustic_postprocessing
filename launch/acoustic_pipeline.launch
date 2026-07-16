@@ -14,9 +14,9 @@
     <!-- Bags and output -->
     <!-- Andratx -->
     <!-- classical lawnmower -->
-    <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/13_52_22/sparus2_multibeam_2026-07-02-11-52-22_0.bag"/>
+    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/13_52_22/sparus2_multibeam_2026-07-02-11-52-22_0.bag"/> -->
     <!-- octogon -->
-    <!-- <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/12_52_41/sparus2_multibeam_2026-07-02-10-52-41_0.bag"/> -->
+    <arg name="mb_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/12_52_41/sparus2_multibeam_2026-07-02-10-52-41_0.bag"/>
     <!-- sss -->
     <arg name="sss_bagfile" default="/media/uib/Datos/bagfiles/andratx/download_2026-07-07_08-06-28/2026_07_02/10_44_27/sparus2_sidescan_2026-07-02-08-44-27_0.bag"/>
     
@@ -177,6 +177,9 @@
         <node pkg="acoustic_postprocessing" type="sss_waterfall.py" name="sss_waterfall_gen" output="screen">
             <param name="bag_file"   value="$(arg sss_bagfile)"/>
             <param name="output_dir" value="$(arg output_dir)"/>
+            <param name="nav_topic"  value="/sparus2/navigator/navigation"/>
+            <!-- Same range source as the mosaic: read from the bag unless overridden. -->
+            <param name="sonar_range" value="$(arg sss_sonar_range)"/>
         </node>
     </group>
 
